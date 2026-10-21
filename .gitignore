@@ -1,0 +1,19 @@
+# Godot 4
+.godot/
+/android/
+*.translation
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# 编辑器 / 系统
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
