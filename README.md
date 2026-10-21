@@ -6,9 +6,9 @@ Godot 4 开发，先做单机剧情，后加 4 人联机。
 
 ## 现状
 
-**规则核心已实现（纯 C++），能跑自动对局拿到平衡性基线。**
+**规则核心 + 线协议 + headless 服务器已完成。** Godot 客户端尚未开始（本机未安装引擎）。
 
-Godot 客户端与联机服务器尚未开始，架构已定稿于 [`docs/architecture.md`](docs/architecture.md)。
+`md_selftest` 26 项端到端断言全绿；`md_sim` 200 局基线见 [`docs/architecture.md`](docs/architecture.md)。
 
 ## 核心机制
 
@@ -27,7 +27,10 @@ Godot 客户端与联机服务器尚未开始，架构已定稿于 [`docs/archit
 | 路径 | 内容 |
 |---|---|
 | `core/` | **规则核心**，零依赖 C++20 静态库。不引用 Godot，不引用 socket |
+| `net/` | **线协议**（Command 解析 / PlayerView 编码）+ `Room` 会话层，同样不碰 socket |
 | `apps/md_sim/` | 批量对局模拟器，用于平衡性回归 |
+| `apps/md_selftest/` | 无网络端到端自检，26 项断言 |
+| `apps/md_server/` | headless 服务器，TCP + 换行分隔 JSON（薄壳，只做投递） |
 | [`docs/architecture.md`](docs/architecture.md) | Godot + C++ 服务器架构、数据流、实测基线、已知问题 |
 | [`docs/design-validation.md`](docs/design-validation.md) | 规则验证报告：四项模拟实验的结论、牌池权重表、定稿规则表 v0.1 |
 | `sim/` | 设计期的 Python 验证脚本（与 `core/` 独立，保留作对账用） |
@@ -37,13 +40,27 @@ Godot 客户端与联机服务器尚未开始，架构已定稿于 [`docs/archit
 C++20，无第三方依赖。
 
 ```bash
+# 模拟器
 g++ -std=c++20 -O2 -I core/include core/src/*.cpp apps/md_sim/main.cpp -o build/md_sim
 ./build/md_sim 200 1 8 7 9          # 局数 种子 最大轮数 阵营解锁 身份解锁
 ./build/md_sim 400 1 8 6 9 --csv    # 扫参用，输出单行 CSV
 ./build/md_sim 1 1 8 7 9 --trace    # 逐动作打印一局
+
+# 端到端自检
+g++ -std=c++20 -O2 -I core/include -I net/include \
+    core/src/*.cpp net/src/*.cpp apps/md_selftest/main.cpp -o build/md_selftest
+./build/md_selftest
+
+# headless 服务器（Windows 需额外 -lws2_32）
+g++ -std=c++20 -O2 -I core/include -I net/include \
+    core/src/*.cpp net/src/*.cpp apps/md_server/main.cpp -o build/md_server -lws2_32
+./build/md_server --port 24680 --seed 1 -v
 ```
 
 也可以用 CMake：`cmake -B build && cmake --build build`。
+
+> ⚠️ 本机（Windows + Application Control）会拦截任何链接 `ws2_32` 的可执行文件，
+> 所以 `md_server.exe` 能编译但不能在本机运行。细节见架构文档。
 
 ## 复跑验证
 

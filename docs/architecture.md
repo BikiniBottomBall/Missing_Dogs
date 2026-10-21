@@ -76,6 +76,58 @@ Godot 的 high-level multiplayer 把序列化和属性复制交给引擎，它�
 
 **不要把剧情和卡牌数值写死在 C++ 里**，否则改一句台词都要重编译。目前牌池权重还硬编码在 `identity_weights()` 里，接 GDExtension 之前应该挪进 JSON。
 
+## 服务器分层
+
+```
+apps/md_server/main.cpp   socket、select、投递（~250 行，不含任何规则）
+        │  Delivery{conn, line}
+        ▼
+md::net::Room             座位、回合、视角裁剪、掉线转 AI —— 不碰 socket
+        │
+        ▼
+md::Session               规则
+```
+
+`Room` 只产出 `Delivery{conn, line}`，它不知道 socket 存在。`md_server` 的唯一职责是把 `line`
+写到 `conn` 对应的 fd 上。
+
+**这个拆分不是洁癖**：见下面的环境限制——本机根本跑不了 socket 程序。把 Room 解耦之后，
+真正会出错的部分（座位、回合、视角裁剪、掉线接管）仍然可以被完整验证。
+
+## 无网络端到端自检
+
+`apps/md_selftest` 直接驱动 `Room`，26 项断言：
+
+| 用例 | 验证什么 |
+|---|---|
+| AI 自对局 | 四个 AI 能自行打完一局，且不产生任何真人投递 |
+| 单真人 + 三 AI | join → start → 走完整局 → 收到 over |
+| **隐藏信息** | 每一份 view 里的手牌张数 == `pub_hand[自己]`，未泄露他人手牌 |
+| 非法输入 | 他人回合行动、伪造 `seat`、非法 JSON、未知命令均被拒 |
+| 越界下标 | `illegal move` |
+| 掉线 | 该座位转 AI，其余人仍能打完 |
+
+其中"伪造 seat"这一条值得强调：**服务器一律以连接自身的座位为准，绝不信任客户端自报的
+seat 字段**。少了这一条，任何客户端都能替别人行动。
+
+## 环境限制
+
+这台机器上**任何链接了 `ws2_32` 的可执行文件都会被 Windows Application Control 拦下**。
+用一个 30 行的探针确认过：
+
+```
+probe_plain.exe   → 正常运行
+probe_wsa.exe     → An Application Control policy has blocked this file
+```
+
+所以 `md_server.exe` 能编译、能链接，但**不能在本机运行**。要跑起来得换一台机器：
+
+```bash
+./build/md_server --port 24680 --seed 1 -v
+```
+
+客户端直连 TCP 发换行分隔的 JSON 即可，协议见 `apps/md_server/main.cpp` 顶部注释。
+
 ## 当前实测基线（200 局，最大 8 轮，阵营解锁 7 / 身份解锁 9）
 
 | 指标 | 数值 |
@@ -127,7 +179,7 @@ g++ -std=c++20 -O2 -I core/include core/src/*.cpp apps/md_sim/main.cpp -o build/
 
 ## 下一步
 
-1. 装 Godot 4 + 拉 godot-cpp，把 `core/` 接成 GDExtension（单机）
-2. 建 `apps/md_server`，TCP + 长度前缀 + JSON（联机）
-3. 把 AI 从 `core` 里拆成策略插件，联机时直接拿去补位
-4. 牌池权重挪进 JSON，让策划不重编译就能调平衡
+1. 装 Godot 4 + 拉 godot-cpp，把 `core/` + `md_net` 接成 GDExtension（单机进程内）
+2. 把 AI 从 `core` 里拆成策略插件，联机时直接拿去补位（现在 `ai_decide` 已经是单一入口，只吃 `PlayerView`）
+3. 牌池权重挪进 JSON，让策划不重编译就能调平衡
+4. 补一个真正的压测：4 个脚本客户端并发，验证掉线、重连、超时
