@@ -89,20 +89,38 @@ jobs:
           }
           Write-Host "选用 Godot: $($pick.tag_name)"
           $asset = $pick.assets | Where-Object { $_.name -like '*win64.exe.zip' } | Select-Object -First 1
-          if (-not $asset) { Write-Error "找不到 win64 资源"; exit 1 }
+          if (-not $asset) { Write-Host "::error::找不到 win64 资源"; exit 1 }
           Invoke-WebRequest -Uri $asset.browser_download_url -OutFile godot.zip
           Expand-Archive godot.zip -DestinationPath godot-bin -Force
           $exe = Get-ChildItem godot-bin -Filter *.exe -Recurse | Select-Object -First 1
-          "GODOT_EXE=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          if (-not $exe) { Write-Host "::error::解压后没有 exe"; exit 1 }
+          Write-Host "Godot exe: $($exe.FullName)"
+          echo "GODOT_EXE=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Godot 首次导入（生成 extension_list.cfg）
         shell: pwsh
         run: |
-          Write-Host "Godot: $env:GODOT_EXE"
-          & $env:GODOT_EXE --headless --path godot --import
-          Write-Host "import exit: $LASTEXITCODE"
-          if (-not (Test-Path godot/.godot/extension_list.cfg)) { Write-Error "没有生成 extension_list.cfg"; exit 1 }
-          Get-Content godot/.godot/extension_list.cfg
+          if (-not $env:GODOT_EXE) { Write-Host "::error::GODOT_EXE 为空"; exit 1 }
+          if (-not (Test-Path $env:GODOT_EXE)) { Write-Host "::error::GODOT_EXE 指向的文件不存在: $env:GODOT_EXE"; exit 1 }
+          $proj = Join-Path $env:GITHUB_WORKSPACE "godot"
+          Write-Host "引擎: $env:GODOT_EXE"
+          Write-Host "工程: $proj"
+
+          $out = & $env:GODOT_EXE --headless --path $proj --import 2>&1
+          $code = $LASTEXITCODE
+          $out | Select-Object -Last 20
+          Write-Host "import exit code: $code"
+
+          $cfg = Join-Path $proj ".godot/extension_list.cfg"
+          if (-not (Test-Path $cfg)) {
+            $tail = ($out | Select-Object -Last 6) -join " || "
+            Write-Host "::error::没有生成 extension_list.cfg（import exit=$code）。输出尾部: $tail"
+            Write-Host "--- .godot 内容 ---"
+            Get-ChildItem (Join-Path $proj ".godot") -ErrorAction SilentlyContinue
+            exit 1
+          }
+          Write-Host "extension_list.cfg:"
+          Get-Content $cfg
 
       - name: 客户端层自检（transport 三项应真跑）
         shell: pwsh
