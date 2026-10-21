@@ -6,7 +6,9 @@ Godot 4 开发，先做单机剧情，后加 4 人联机。
 
 ## 现状
 
-**规则设计阶段。** 核心玩法已用蒙特卡洛模拟验证机制可行性，尚未进入实现。
+**规则核心已实现（纯 C++），能跑自动对局拿到平衡性基线。**
+
+Godot 客户端与联机服务器尚未开始，架构已定稿于 [`docs/architecture.md`](docs/architecture.md)。
 
 ## 核心机制
 
@@ -24,8 +26,24 @@ Godot 4 开发，先做单机剧情，后加 4 人联机。
 
 | 路径 | 内容 |
 |---|---|
+| `core/` | **规则核心**，零依赖 C++20 静态库。不引用 Godot，不引用 socket |
+| `apps/md_sim/` | 批量对局模拟器，用于平衡性回归 |
+| [`docs/architecture.md`](docs/architecture.md) | Godot + C++ 服务器架构、数据流、实测基线、已知问题 |
 | [`docs/design-validation.md`](docs/design-validation.md) | 规则验证报告：四项模拟实验的结论、牌池权重表、定稿规则表 v0.1 |
-| `sim/` | 可复跑的验证脚本（Python + numpy），`*_report.md` 是对应输出 |
+| `sim/` | 设计期的 Python 验证脚本（与 `core/` 独立，保留作对账用） |
+
+## 构建
+
+C++20，无第三方依赖。
+
+```bash
+g++ -std=c++20 -O2 -I core/include core/src/*.cpp apps/md_sim/main.cpp -o build/md_sim
+./build/md_sim 200 1 8 7 9          # 局数 种子 最大轮数 阵营解锁 身份解锁
+./build/md_sim 400 1 8 6 9 --csv    # 扫参用，输出单行 CSV
+./build/md_sim 1 1 8 7 9 --trace    # 逐动作打印一局
+```
+
+也可以用 CMake：`cmake -B build && cmake --build build`。
 
 ## 复跑验证
 

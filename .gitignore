@@ -1,3 +1,11 @@
+# 构建产物
+build/
+out/
+*.obj
+*.o
+*.exe
+*.pdb
+
 # Godot 4
 .godot/
 /android/
