@@ -37,6 +37,7 @@ static const sock_t kBadSock = INVALID_SOCKET;
 #else
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -112,6 +113,10 @@ int Server::run() {
     std::printf("[server] WSAStartup failed\n");
     return 1;
   }
+#else
+  // 对端断开后再写会触发 SIGPIPE，默认行为是直接杀掉进程。
+  // 客户端掉线是常态，不能让服务器跟着死。
+  ::signal(SIGPIPE, SIG_IGN);
 #endif
   const sock_t listen_fd = ::socket(AF_INET, SOCK_STREAM, 0);
   if (listen_fd == kBadSock) {

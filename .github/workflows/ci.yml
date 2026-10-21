@@ -1,0 +1,114 @@
+name: CI
+
+# 本机（Windows + Smart App Control/WDAC）会拦掉所有新编译的二进制，
+# 所以完整验证放在 CI 上跑：
+#   linux   —— 规则、协议、真 TCP 联调、stdio 子进程
+#   windows —— GDExtension + Godot headless，跑客户端层那三项 transport 自检
+#
+# 公共仓库的 Actions 分钟数免费。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux / 规则 + 协议 + TCP 联调
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake ninja-build g++ python3
+
+      - name: 构建
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j"$(nproc)"
+
+      - name: C++ 端到端自检（26 项）
+        run: ./build/md_selftest
+
+      - name: 200 局平衡基线
+        run: ./build/md_sim 200 1 8 7 9 | tee baseline.txt
+
+      - name: stdio 服务器冒烟
+        run: |
+          out=$(printf '{"t":"join"}\n{"t":"start"}\n' | ./build/md_stdio --seed 5 --rounds 8)
+          echo "$out" | head -5
+          echo "$out" | grep -q '"t":"ready"' || { echo "缺少 ready"; exit 1; }
+          echo "$out" | grep -q '"t":"sync"' || { echo "缺少 sync"; exit 1; }
+
+      - name: TCP 集成测试（真 socket、真进程）
+        run: python3 tools/tcp_client_test.py ./build/md_server
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-baseline
+          path: baseline.txt
+          if-no-files-found: ignore
+
+  windows:
+    name: Windows / GDExtension + Godot
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 拉取 godot-cpp
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/fetch-godot-cpp.ps1
+
+      - name: 构建（含 GDExtension）
+        shell: pwsh
+        run: |
+          cmake -S . -B build-gdext -A x64 `
+                -DGODOTCPP_TARGET=template_release -DMD_BUILD_GDEXTENSION=ON
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          cmake --build build-gdext --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Get-ChildItem godot/addons/md_core/bin
+
+      - name: 下载 Godot 4.7 headless
+        shell: pwsh
+        run: |
+          $rels = Invoke-RestMethod "https://api.github.com/repos/godotengine/godot/releases?per_page=40"
+          $pick = $rels | Where-Object { $_.tag_name -match '^4\.7\.\d+-stable$' } | Select-Object -First 1
+          if (-not $pick) {
+            $pick = $rels | Where-Object { $_.tag_name -match '^4\.\d+\.\d+-stable$' } | Select-Object -First 1
+          }
+          Write-Host "选用 Godot: $($pick.tag_name)"
+          $asset = $pick.assets | Where-Object { $_.name -like '*win64.exe.zip' } | Select-Object -First 1
+          if (-not $asset) { Write-Error "找不到 win64 资源"; exit 1 }
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile godot.zip
+          Expand-Archive godot.zip -DestinationPath godot-bin -Force
+          $exe = Get-ChildItem godot-bin -Filter *.exe -Recurse | Select-Object -First 1
+          "GODOT_EXE=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Godot 首次导入（生成 extension_list.cfg）
+        shell: pwsh
+        run: |
+          Write-Host "Godot: $env:GODOT_EXE"
+          & $env:GODOT_EXE --headless --path godot --import
+          Write-Host "import exit: $LASTEXITCODE"
+          if (-not (Test-Path godot/.godot/extension_list.cfg)) { Write-Error "没有生成 extension_list.cfg"; exit 1 }
+          Get-Content godot/.godot/extension_list.cfg
+
+      - name: 客户端层自检（transport 三项应真跑）
+        shell: pwsh
+        run: |
+          $stdio = "build-gdext/Release/md_stdio.exe"
+          if (Test-Path $stdio) { $env:MD_STDIO_EXE = (Resolve-Path $stdio).Path }
+          if (Test-Path "build-gdext/Release/md_server.exe") { Write-Host "md_server 也在" }
+          & $env:GODOT_EXE --headless --path godot
+          if ($LASTEXITCODE -ne 0) { exit 1 }

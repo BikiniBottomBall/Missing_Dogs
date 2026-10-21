@@ -2,15 +2,12 @@ extends Node
 #
 # 客户端层自检。分两部分：
 #
-#   A. 现在就能验的：MDClient 的协议状态机、MDClientHost 的接线
-#   B. 需要外部条件的：本地 GDExtension、stdio 子进程、TCP loopback
+#   A. 不依赖任何外部二进制：MDClient 的协议状态机、MDClientHost 的接线
+#   B. 需要外部条件：本地 GDExtension、stdio 子进程、TCP loopback
 #      —— 条件不满足时**显式跳过**并说明原因，不算通过
 #
-# 之所以这样拆：这台机器上 Smart App Control / WDAC 会拦掉所有新编译的
-# 二进制（exe 和 dll 都拦，连放到 TEMP 也一样），所以 GDExtension 和
-# 子进程这两条路在策略解除前跑不了。假装它们通过了没有意义。
-#
 # 跑法：godot --headless --path godot
+# 可用环境变量 MD_STDIO_EXE 指定 stdio 服务器位置。
 
 var fails := 0
 var skips := 0
@@ -19,17 +16,18 @@ var passes := 0
 
 func _ready() -> void:
 	print("---- 客户端层自检 ----")
+	print("引擎: %s" % Engine.get_version_info().string)
 
 	_test_client_protocol()
 	_test_host_wiring()
 	_test_local_extension()
-	_test_stdio_transport()
-	_test_tcp_loopback()
+	await _test_stdio_transport()
+	await _test_tcp_loopback()
 
 	print("\n--------------------------------------------------")
 	print("通过 %d 项，跳过 %d 项，失败 %d 项" % [passes, skips, fails])
 	if skips > 0:
-		print("（跳过的项目需要解除本机的二进制策略后重跑）")
+		print("（跳过的项目说明外部条件不足，不计入通过）")
 	print("自检结果: ", "PASS" if fails == 0 else "FAIL")
 	get_tree().quit(0 if fails == 0 else 1)
 
@@ -103,13 +101,11 @@ func _test_client_protocol() -> void:
 			_check("命令类型 play", str(d.get("t")) == "cmd" and str(d.get("k")) == "play")
 			_check("命令带上了手牌与目标", int(d.get("a", -99)) == 0 and int(d.get("b", -99)) == 1)
 
-	# 泄露检测
 	var c2 := MDClient.new()
 	c2.feed('{"t":"joined","seat":0}')
 	c2.feed(VIEW_LEAK)
 	_check("检测到手牌张数不一致", c2.leak)
 
-	# 结束
 	var c3 := MDClient.new()
 	var over: Array[Dictionary] = []
 	c3.game_over.connect(func(r): over.append(r))
@@ -117,7 +113,6 @@ func _test_client_protocol() -> void:
 	_check("over 置 done", c3.done)
 	_check("over 触发信号", over.size() == 1)
 
-	# 错误处理
 	var c4 := MDClient.new()
 	var errs: Array[String] = []
 	c4.error_received.connect(func(m): errs.append(m))
@@ -128,7 +123,6 @@ func _test_client_protocol() -> void:
 	_check("非法 JSON 被上报", errs.size() >= 2)
 	_check("未知消息类型被上报", errs.size() == 3)
 
-	# 策略钩子
 	var c5 := MDClient.new()
 	var got: Array[String] = []
 	c5.policy = func(_act, _self): return '{"t":"cmd","k":"gather","a":2}'
@@ -144,7 +138,6 @@ class FakeLink extends RefCounted:
 	signal line_received(conn: int, line: String)
 	signal connected
 	var sent: Array[String] = []
-	var open_calls := 0
 
 	func send(_conn: int, line: String) -> void:
 		sent.append(line)
@@ -153,7 +146,6 @@ class FakeLink extends RefCounted:
 		pass
 
 	func fire_connected() -> void:
-		open_calls += 1
 		connected.emit()
 
 
@@ -177,13 +169,27 @@ func _test_host_wiring() -> void:
 # ---------------------------------------------------------------------------
 # B. 需要外部条件的部分
 # ---------------------------------------------------------------------------
-const STDIO_EXE := "D:/Code/DSH/Missing_Dogs/build/md_stdio.exe"
+func _find_stdio_exe() -> String:
+	var candidates: Array[String] = []
+	var env := OS.get_environment("MD_STDIO_EXE")
+	if env != "":
+		candidates.append(env)
+	var repo := ProjectSettings.globalize_path("res://").path_join("..").simplify_path()
+	for rel in [
+		"build/md_stdio", "build/md_stdio.exe",
+		"build-gdext/Release/md_stdio.exe", "build-gdext/md_stdio",
+	]:
+		candidates.append(repo.path_join(rel))
+	for c in candidates:
+		if FileAccess.file_exists(c):
+			return c
+	return ""
 
 
 func _test_local_extension() -> void:
 	print("\n[B1] 本地 transport（GDExtension 进程内）")
 	if not ClassDB.class_exists("MDLocalServer"):
-		_skip("本地 transport", "MDLocalServer 未注册：dll 被代码完整性策略拦下")
+		_skip("本地 transport", "MDLocalServer 未注册：GDExtension 没有加载")
 		return
 
 	var link := MDLocalLink.new()
@@ -198,21 +204,24 @@ func _test_local_extension() -> void:
 
 	_check("跑完整局", host.client.done)
 	_check("拿到座位号", host.client.seat == 0)
+	_check("有历史出牌记录", host.client.history.size() > 0)
 	_check("手牌未泄露", not host.client.leak)
 
 
 func _test_stdio_transport() -> void:
 	print("\n[B2] stdio transport（真子进程）")
-	if not FileAccess.file_exists(STDIO_EXE):
-		_skip("stdio transport", "找不到 " + STDIO_EXE)
+	var exe := _find_stdio_exe()
+	if exe == "":
+		_skip("stdio transport", "找不到 md_stdio 可执行文件")
 		return
+	print("     使用: ", exe)
 
 	var link := MDStdioLink.new()
 	var host := MDClientHost.new(link)
 	var failed: Array[String] = []
 	link.connect_failed.connect(func(m): failed.append(m))
 
-	if link.open(STDIO_EXE, 5, 8) != OK:
+	if link.open(exe, 5, 8) != OK:
 		_skip("stdio transport", "子进程启动失败：" + ", ".join(failed))
 		return
 
@@ -222,6 +231,7 @@ func _test_stdio_transport() -> void:
 		link.poll()
 
 	_check("跑完整局", host.client.done)
+	_check("拿到座位号", host.client.seat == 0)
 	_check("手牌未泄露", not host.client.leak)
 	link.shutdown()
 
@@ -231,4 +241,89 @@ func _test_tcp_loopback() -> void:
 	if not ClassDB.class_exists("MDLocalServer"):
 		_skip("TCP transport", "对端需要 MDLocalServer 驱动规则，当前不可用")
 		return
-	_skip("TCP transport", "需要可运行的 C++ 服务器；本机 ws2_32 被拦，且 dll 被拦")
+
+	var relay := LoopbackRelay.new(11, 8)
+	if not relay.ok:
+		_skip("TCP transport", "监听端口失败")
+		return
+
+	var link := MDTcpLink.new()
+	var host := MDClientHost.new(link)
+	var failed: Array[String] = []
+	link.connect_failed.connect(func(m): failed.append(m))
+
+	if link.open("127.0.0.1", relay.port) != OK:
+		_skip("TCP transport", "发起连接失败")
+		return
+
+	var frames := 0
+	while not host.client.done and frames < 3000:
+		await get_tree().process_frame
+		relay.poll()
+		link.poll()
+		frames += 1
+
+	_check("跑完整局", host.client.done)
+	_check("拿到座位号", host.client.seat == 0)
+	_check("手牌未泄露", not host.client.leak)
+	if not failed.is_empty():
+		print("     连接错误: ", failed)
+
+
+# ---------------------------------------------------------------------------
+# 对端：把 TCP 连接桥接到同一个 MDLocalServer（用动态取类，扩展缺失时不影响解析）
+# ---------------------------------------------------------------------------
+class LoopbackRelay:
+	var server := TCPServer.new()
+	var srv = null
+	var peer: StreamPeerTCP = null
+	var buf := ""
+	var pending: Array[String] = []
+	var port := 0
+	var ok := false
+
+	func _init(seed: int, rounds: int) -> void:
+		ok = server.listen(0, "127.0.0.1") == OK
+		if not ok:
+			return
+		port = server.get_local_port()
+		srv = ClassDB.instantiate("MDLocalServer")
+		if srv == null:
+			ok = false
+			return
+		srv.delivery.connect(_on_delivery)
+		srv.create(seed, rounds)
+
+	func _on_delivery(conn: int, line: String) -> void:
+		if conn != 0:
+			return
+		if peer == null:
+			pending.append(line)
+		else:
+			peer.put_data((line + "\n").to_utf8_buffer())
+
+	func poll() -> void:
+		if peer == null:
+			if server.is_connection_available():
+				peer = server.take_connection()
+				for line in pending:
+					peer.put_data((line + "\n").to_utf8_buffer())
+				pending.clear()
+			return
+
+		var avail := peer.get_available_bytes()
+		if avail <= 0:
+			return
+		var res := peer.get_data(avail)
+		if int(res[0]) != OK:
+			return
+		buf += (res[1] as PackedByteArray).get_string_from_utf8()
+		while true:
+			var nl := buf.find("\n")
+			if nl < 0:
+				break
+			var line := buf.substr(0, nl)
+			buf = buf.substr(nl + 1)
+			line = line.strip_edges()
+			if line != "":
+				srv.send(0, line)
