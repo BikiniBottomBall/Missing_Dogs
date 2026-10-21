@@ -62,6 +62,9 @@ jobs:
     name: Windows / GDExtension + Godot
     runs-on: windows-latest
     timeout-minutes: 45
+    env:
+      # gh 的 API 调用要鉴权，否则一样会撞限流
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
 
@@ -89,16 +92,39 @@ jobs:
             Get-ChildItem build-gdext/Release -Filter *.exe -ErrorAction SilentlyContinue | Select-Object Name
 
             # --- 下载 ---
-            $rels = Invoke-RestMethod "https://api.github.com/repos/godotengine/godot/releases?per_page=40"
-            $pick = $rels | Where-Object { $_.tag_name -match '^4\.7\.\d+-stable$' } | Select-Object -First 1
-            if (-not $pick) {
-              $pick = $rels | Where-Object { $_.tag_name -match '^4\.\d+\.\d+-stable$' } | Select-Object -First 1
+            # 不要用未鉴权的 REST API：共享 runner IP 很容易撞上 60 次/小时的限流
+            # （上一个 run 就是这么挂的：403 rate limit exceeded）。
+            # 优先用 gh（Runner 上自带，且带鉴权），失败再退回固定下载 URL。
+            New-Item -ItemType Directory -Force -Path godot-dl | Out-Null
+            $tag = $null
+            $listing = gh release list --repo godotengine/godot --limit 80 --json tagName --jq ".[].tagName" 2>$null
+            if ($LASTEXITCODE -eq 0 -and $listing) {
+              $tag = $listing | Where-Object { $_ -match '^4\.7\.\d+-stable$' } | Select-Object -First 1
+              if (-not $tag) {
+                $tag = $listing | Where-Object { $_ -match '^4\.\d+\.\d+-stable$' } | Select-Object -First 1
+              }
             }
-            Write-Host "选用 Godot: $($pick.tag_name)"
-            $asset = $pick.assets | Where-Object { $_.name -like '*win64.exe.zip' } | Select-Object -First 1
-            if (-not $asset) { throw "该 release 没有 win64.exe.zip 资源" }
-            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile godot.zip
-            Expand-Archive godot.zip -DestinationPath godot-bin -Force
+            if ($tag) {
+              Write-Host "gh 选中: $tag"
+              gh release download $tag --repo godotengine/godot --pattern "*win64.exe.zip" --dir godot-dl --clobber
+            }
+            if (-not (Get-ChildItem godot-dl -Filter *.zip -ErrorAction SilentlyContinue)) {
+              Write-Host "gh 没取到，改用固定 URL"
+              foreach ($cand in @("4.7.2-stable", "4.7.1-stable", "4.7-stable")) {
+                $url = "https://github.com/godotengine/godot/releases/download/" + $cand + "/Godot_v" + $cand + "_win64.exe.zip"
+                try {
+                  Write-Host "尝试 $url"
+                  Invoke-WebRequest -Uri $url -OutFile "godot-dl/godot.zip"
+                  break
+                } catch {
+                  Write-Host "  失败: $($_.Exception.Message)"
+                }
+              }
+            }
+            $zip = Get-ChildItem godot-dl -Filter *.zip | Select-Object -First 1
+            if (-not $zip) { throw "没下载到 Godot 压缩包" }
+            Write-Host "压缩包: $($zip.FullName) ($($zip.Length) bytes)"
+            Expand-Archive $zip.FullName -DestinationPath godot-bin -Force
             $exe = (Get-ChildItem godot-bin -Filter *.exe -Recurse | Select-Object -First 1).FullName
             if (-not $exe) { throw "解压后找不到 exe" }
             Write-Host "引擎: $exe"
