@@ -34,7 +34,12 @@ class MDLocalServer : public RefCounted {
   MDLocalServer();
   ~MDLocalServer() override;
 
+  // 只建房、不自动入座。让本地模式也能像联机那样由客户端自己发 join / start，
+  // 这样两种 transport 的时序完全一致。
+  void create(int64_t seed, int64_t max_rounds);
+
   // 开一局：conn 0 是本地玩家，座位 1..3 由内置 AI 接管。
+  // 等价于 create() + 自动发 join + start，图省事用。
   void start(int64_t seed, int64_t max_rounds);
 
   // 等同于网络上传入一行 JSON。所有合法性校验都在 Room 里。

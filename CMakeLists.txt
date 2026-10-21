@@ -47,6 +47,12 @@ if(WIN32)
   target_link_libraries(md_server PRIVATE ws2_32)
 endif()
 
+# ---------------------------------------------------------------- stdio 服务器
+# 不碰 socket、不碰 Godot：让 Godot 用管道把服务器当子进程跑。
+# 用途是在"dll 与 socket 都被策略拦掉"的环境里仍能做进程级联调。
+add_executable(md_stdio apps/md_stdio/main.cpp)
+target_link_libraries(md_stdio PRIVATE md_core md_net)
+
 # ---------------------------------------------------------------- GDExtension
 # 需要先准备 third_party/godot-cpp（脚本见 tools/fetch-godot-cpp.ps1）。
 #   cmake -B build-gdext -G "Visual Studio 18 2026" -A x64 \

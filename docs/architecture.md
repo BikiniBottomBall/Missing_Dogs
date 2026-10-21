@@ -204,6 +204,79 @@ godot --headless --path godot
 MSVC 下必须让所有目标用静态 CRT（`/MT`），因为 godot-cpp 和 Godot 本体都是静态 CRT，
 混用会报 `LNK2038 RuntimeLibrary 不匹配`。根 `CMakeLists.txt` 里已经设好。
 
+## 客户端层：一套协议，三种 transport
+
+`godot/client/` 把客户端拆成"协议状态机"和"transport"两层。**`MDClient` 不知道
+transport 存在，三个 link 也不知道协议语义**。
+
+```
+                 ┌─ MDLocalLink  (GDExtension 进程内)
+MDClientHost ────┼─ MDStdioLink  (子进程，stdin/stdout)
+      │          └─ MDTcpLink    (TCP，连 md_server)
+      │
+   MDClient  ← 只吃 JSON 行，只吐命令 JSON
+```
+
+`MDClientHost` 里真正的接线只有三处，这就是"单机与联机走同一套协议"的兑现处：
+
+```gdscript
+func _on_connected():  _link.send(0, '{"t":"join"}'); _link.send(0, '{"t":"start"}')
+func _on_line(conn, line):  client.feed(line)
+func _on_command(cmd):  _link.send(0, cmd)
+```
+
+三个 link 的 `open()` 签名略有不同，但 `send()` / `line_received` / `connected`
+完全一致，所以换 transport 不需要动 `MDClient` 和 `MDClientHost` 一个字。
+
+### stdio transport 的同步哨兵
+
+`MDStdioLink` 用的 `FileAccess` 读是**阻塞**的，所以协议多一个哨兵：服务器处理完
+一条命令后必发 `{"t":"sync"}`，客户端读到它就结束本轮读取（这个哨兵不会转给
+`MDClient`）。
+
+同时 `send()` 里做了防重入：`delivery` 回调中再次 `send()` 会把命令塞进队列交给
+外层循环，避免嵌套阻塞读造成死锁。
+
+## 环境墙：本机会拦掉所有新编译的二进制
+
+这是这台机器上最影响验证的事，记清楚免得反复踩。
+
+| 现象 | 证据 |
+|---|---|
+| 新编的 **exe** 被拦 | `md_stdio.exe` → *blocked by your organization's Device Guard policy* |
+| 新编的 **dll** 被拦 | `md_core.windows.x86_64.dll` → *Error 4551: 应用程序控制策略已阻止此文件* |
+| **不是路径问题** | 复制到 `%TEMP%` 再跑，照样被拦 |
+| **不是 socket 问题** | `md_stdio.exe` 完全不碰网络，一样被拦 |
+| 旧编的仍可运行 | `md_selftest.exe`（更早编的）至今 26 项全过 |
+| 机器上有启用中的 WDAC 策略 | `C:\Windows\System32\CodeIntegrity\CiPolicies\Active` 下 8 个 `.cip` |
+| Smart App Control 处于强制 | `HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy` 里 `VerifiedAndReputablePolicyState = 1` |
+
+同一个编译器、同一分钟内编出来的两个探针，一个能跑一个被拦，说明这是**基于
+信誉的策略**而不是我们能绕的规则。所以本轮起：
+
+- `md_selftest.exe`（旧构建）继续作为 C++ 侧的回归基线
+- GDExtension 与 `md_stdio` 的联调**暂时跑不了**
+
+**没有解决办法是"再编一次"**。要真正解除，得在这台机器上把 Smart App Control
+关掉（注意：SAC 关掉后无法再打开，除非重装系统），或者让管理员把工作目录加进
+WDAC 策略的白名单，或对产物做代码签名。
+
+## 自检的"跳过"语义
+
+`godot --headless --path godot` 跑 `test/protocol_shared_test.gd`，它分两类：
+
+- **A 类（现在就能跑）**：`MDClient` 协议状态机（用真实编码格式的样例行）、
+  `MDClientHost` 的接线（用假 transport）
+- **B 类（需要外部条件）**：本地 GDExtension、stdio 子进程、TCP loopback
+
+B 类在条件不满足时**显式打印 `[skip]` 并说明原因**，不算通过。当前：
+
+```
+通过 24 项，跳过 3 项，失败 0 项
+```
+
+等策略解除后重跑同一条命令，跳过的三项会自动变成真跑。
+
 ## 当前实测基线（200 局，最大 8 轮，阵营解锁 7 / 身份解锁 9）
 
 | 指标 | 数值 |

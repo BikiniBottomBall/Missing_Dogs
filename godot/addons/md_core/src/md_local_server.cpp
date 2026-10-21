@@ -13,6 +13,7 @@ MDLocalServer::MDLocalServer() = default;
 MDLocalServer::~MDLocalServer() = default;
 
 void MDLocalServer::_bind_methods() {
+  ClassDB::bind_method(D_METHOD("create", "seed", "max_rounds"), &MDLocalServer::create);
   ClassDB::bind_method(D_METHOD("start", "seed", "max_rounds"), &MDLocalServer::start);
   ClassDB::bind_method(D_METHOD("send", "conn", "line"), &MDLocalServer::send);
   ClassDB::bind_method(D_METHOD("disconnect", "conn"), &MDLocalServer::disconnect);
@@ -42,15 +43,20 @@ void MDLocalServer::flush() {
 }
 
 void MDLocalServer::start(int64_t seed, int64_t max_rounds) {
-  room_ = std::make_unique<md::net::Room>(static_cast<uint64_t>(seed),
-                                          static_cast<int>(max_rounds));
-  queue_.clear();
+  create(seed, max_rounds);
+  if (!room_) return;
 
   std::vector<md::net::Delivery> out;
   room_->on_message(0, "{\"t\":\"join\"}", out);
   room_->on_message(0, "{\"t\":\"start\"}", out);
   enqueue(out);
   flush();
+}
+
+void MDLocalServer::create(int64_t seed, int64_t max_rounds) {
+  room_ = std::make_unique<md::net::Room>(static_cast<uint64_t>(seed),
+                                          static_cast<int>(max_rounds));
+  queue_.clear();
 }
 
 void MDLocalServer::send(int64_t conn, const String& line) {
