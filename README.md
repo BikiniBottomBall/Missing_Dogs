@@ -6,9 +6,13 @@ Godot 4 开发，先做单机剧情，后加 4 人联机。
 
 ## 现状
 
-**规则核心 + 线协议 + headless 服务器已完成。** Godot 客户端尚未开始（本机未安装引擎）。
+**规则核心 + 线协议 + headless 服务器 + GDExtension 全部跑通。**
 
-`md_selftest` 26 项端到端断言全绿；`md_sim` 200 局基线见 [`docs/architecture.md`](docs/architecture.md)。
+- `md_selftest`（无网络）26 项断言全绿
+- `godot --headless --path godot` 在 Godot **4.7.2** 里进程内跑完一局，隐藏信息未泄露
+- `md_sim` 200 局基线见 [`docs/architecture.md`](docs/architecture.md)
+
+游戏本体（剧情、UI、演出）尚未开始。
 
 ## 核心机制
 
@@ -31,7 +35,9 @@ Godot 4 开发，先做单机剧情，后加 4 人联机。
 | `apps/md_sim/` | 批量对局模拟器，用于平衡性回归 |
 | `apps/md_selftest/` | 无网络端到端自检，26 项断言 |
 | `apps/md_server/` | headless 服务器，TCP + 换行分隔 JSON（薄壳，只做投递） |
-| [`docs/architecture.md`](docs/architecture.md) | Godot + C++ 服务器架构、数据流、实测基线、已知问题 |
+| `godot/` | Godot 4 工程 + GDExtension（单机进程内） |
+| `tools/fetch-godot-cpp.ps1` | 拉取 godot-cpp |
+| [`docs/architecture.md`](docs/architecture.md) | 架构、数据流、GDExtension 踩坑、实测基线、已知问题 |
 | [`docs/design-validation.md`](docs/design-validation.md) | 规则验证报告：四项模拟实验的结论、牌池权重表、定稿规则表 v0.1 |
 | `sim/` | 设计期的 Python 验证脚本（与 `core/` 独立，保留作对账用） |
 
@@ -58,6 +64,30 @@ g++ -std=c++20 -O2 -I core/include -I net/include \
 ```
 
 也可以用 CMake：`cmake -B build && cmake --build build`。
+
+### Godot 客户端（GDExtension）
+
+```powershell
+powershell -File tools/fetch-godot-cpp.ps1        # 拉 godot-cpp，不进仓库
+
+cmake -S . -B build-gdext -G "Visual Studio 18 2026" -A x64 `
+      -DGODOTCPP_TARGET=template_release -DMD_BUILD_GDEXTENSION=ON
+cmake --build build-gdext --config Release
+
+godot --headless --path godot --import            # 首次导入，生成 extension_list.cfg
+godot --headless --path godot                     # 跑单机自检
+```
+
+预期输出：
+
+```
+---- GDExtension 单机自检 ----
+views=9  my_turns=8  overs=1  leak=false
+  [ok] 进程内跑完一局，隐藏信息未泄露
+自检结果: PASS
+```
+
+> `.gdextension` 的两个坑（BOM、4.7 的标签格式）记在架构文档里，踩过一次就不用再踩。
 
 > ⚠️ 本机（Windows + Application Control）会拦截任何链接 `ws2_32` 的可执行文件，
 > 所以 `md_server.exe` 能编译但不能在本机运行。细节见架构文档。

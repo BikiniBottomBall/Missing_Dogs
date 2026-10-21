@@ -128,6 +128,82 @@ probe_wsa.exe     → An Application Control policy has blocked this file
 
 客户端直连 TCP 发换行分隔的 JSON 即可，协议见 `apps/md_server/main.cpp` 顶部注释。
 
+## GDExtension（单机进程内）
+
+`godot/addons/md_core` 把 `md::net::Room` 直接暴露给 GDScript。**注意暴露的不是
+`md::Session`，而是服务器用的同一个 `Room`**——所以单机和联机在客户端看来完全一致：
+都是一条条 JSON 行，只是行的来源不同。
+
+对外只有 5 个方法 + 1 个信号：
+
+```gdscript
+var srv := MDLocalServer.new()
+srv.delivery.connect(func(conn, line): ...)   # 等同于从 socket 读到一行
+srv.start(seed, max_rounds)                   # conn 0 是本地玩家，1..3 由 AI 接管
+srv.send(0, '{"t":"cmd","k":"play","a":2,"b":1}')
+srv.is_over()
+srv.result_json()
+```
+
+`flush()` 里做了防重入：GDScript 在 `delivery` 回调里直接调 `send()` 是正常用法，
+此时新产生的投递会被攒进队列，由外层循环继续排空，不会递归进 `Room`。
+
+### 实测结果（Godot 4.7.2）
+
+```
+---- GDExtension 单机自检 ----
+views=9  my_turns=8  overs=1  leak=false
+对局结果: {"mole_alive":false,"rounds":7.0,"t":"over","winner":"good"}
+  [ok] 进程内跑完一局，隐藏信息未泄露
+自检结果: PASS
+```
+
+### 两个踩过的坑（都会让人以为是别的问题）
+
+**① `.gdextension` 文件不能带 BOM。**
+
+用 PowerShell 的 `Set-Content -Encoding utf8` 写出来会带 BOM（`EF BB BF`），Godot 的
+配置解析会把第一行读成 `\ufeff[configuration]`，报的错却是
+「must contain a configuration/entry_symbol key」——看起来像缺字段，实际是编码。
+
+**② Godot 4.7 的库配置标签变了。**
+
+标签格式是 `<平台>.<配置>.<架构>`，其中「配置」取 `editor` / `template_debug` /
+`template_release`。旧的 `windows.release.x86_64` **在 4.7 里不匹配**，而
+godot-cpp 4.5 自带的 `example.gdextension` 仍是旧写法，照抄就是加载失败。
+
+实测：
+
+| 键 | 结果 |
+|---|---|
+| `windows.release.x86_64` | ❌ 加载失败 |
+| `windows.template_release.x86_64` | ❌ 加载失败（编辑器二进制运行项目时） |
+| `windows.editor.x86_64` | ✅ |
+| `windows.x86_64`（不带配置） | ✅ 兜底匹配 |
+
+所以配置里同时写兜底项和 `editor` 项。
+
+### 构建与运行
+
+```powershell
+# 1. 拉 godot-cpp（约 6 个文件目录，不进仓库）
+powershell -File tools/fetch-godot-cpp.ps1
+
+# 2. 构建（一次搞定 core + net + 扩展）
+cmake -S . -B build-gdext -G "Visual Studio 18 2026" -A x64 `
+      -DGODOTCPP_TARGET=template_release -DMD_BUILD_GDEXTENSION=ON
+cmake --build build-gdext --config Release
+
+# 3. 首次导入（生成 .godot/extension_list.cfg，否则扩展不会被加载）
+godot --headless --path godot --import
+
+# 4. 跑单机自检
+godot --headless --path godot
+```
+
+MSVC 下必须让所有目标用静态 CRT（`/MT`），因为 godot-cpp 和 Godot 本体都是静态 CRT，
+混用会报 `LNK2038 RuntimeLibrary 不匹配`。根 `CMakeLists.txt` 里已经设好。
+
 ## 当前实测基线（200 局，最大 8 轮，阵营解锁 7 / 身份解锁 9）
 
 | 指标 | 数值 |
@@ -179,7 +255,9 @@ g++ -std=c++20 -O2 -I core/include core/src/*.cpp apps/md_sim/main.cpp -o build/
 
 ## 下一步
 
-1. 装 Godot 4 + 拉 godot-cpp，把 `core/` + `md_net` 接成 GDExtension（单机进程内）
+1. 客户端的 TCP 版本：把 `MDLocalServer` 换成一个读 socket 的类，**上面处理 JSON 的那段
+   GDScript 一行都不用改**——这是整套架构要兑现的承诺
 2. 把 AI 从 `core` 里拆成策略插件，联机时直接拿去补位（现在 `ai_decide` 已经是单一入口，只吃 `PlayerView`）
 3. 牌池权重挪进 JSON，让策划不重编译就能调平衡
 4. 补一个真正的压测：4 个脚本客户端并发，验证掉线、重连、超时
+5. 规则问题：身份解锁空转、35% 对局靠超时收场、枪的命中率等于抛硬币（见上）

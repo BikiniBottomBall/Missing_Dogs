@@ -1,0 +1,7 @@
+﻿Godot Engine v4.7.2.stable.steam.ed1daf0bf - https://godotengine.org
+
+---- GDExtension 单机自检 ----
+views=9  my_turns=8  overs=1  leak=false
+对局结果: {"mole_alive":false,"rounds":7.0,"t":"over","winner":"good"}
+  [ok] 进程内跑完一局，隐藏信息未泄露
+自检结果: PASS

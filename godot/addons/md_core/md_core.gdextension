@@ -1,0 +1,15 @@
+[configuration]
+
+entry_symbol = "md_library_init"
+compatibility_minimum = "4.5"
+reloadable = false
+
+[libraries]
+
+windows.x86_64 = "res://addons/md_core/bin/md_core.windows.x86_64.dll"
+windows.editor.x86_64 = "res://addons/md_core/bin/md_core.windows.x86_64.dll"
+windows.template_release.x86_64 = "res://addons/md_core/bin/md_core.windows.x86_64.dll"
+
+linux.x86_64 = "res://addons/md_core/bin/libmd_core.linux.x86_64.so"
+linux.editor.x86_64 = "res://addons/md_core/bin/libmd_core.linux.x86_64.so"
+linux.template_release.x86_64 = "res://addons/md_core/bin/libmd_core.linux.x86_64.so"

@@ -1,0 +1,16 @@
+; Godot 4 项目配置。
+; 打开方式：godot --path godot
+; 单机自检：godot --headless --path godot
+
+config_version=5
+
+[application]
+
+config/name="Missing_Dogs"
+run/main_scene="res://test/local_server_test.tscn"
+config/features=PackedStringArray("4.7")
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
