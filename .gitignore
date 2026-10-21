@@ -1,23 +1,21 @@
 # 构建产物
 build/
-out/
 build-gdext/
+out/
 *.obj
 *.o
 *.exe
 *.pdb
+*.dll
+*.so
 
-# 第三方依赖（用 tools/fetch-godot-cpp.ps1 拉取）
-third_party/godot-cpp/
-
-# GDExtension 构建产物
-godot/addons/md_core/bin/*.dll
-godot/addons/md_core/bin/*.so
-
-# Godot 4
+# Godot
 .godot/
 /android/
 *.translation
+
+# 第三方依赖（reference/tools/fetch-godot-cpp.ps1 拉取）
+reference/third_party/godot-cpp/
 
 # Python
 __pycache__/

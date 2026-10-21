@@ -2,24 +2,26 @@
 
 四人局 **剧情向卡牌游戏**。四个失忆的人、一把枪、一副会泄露身份的牌。
 
-Godot 4 开发，先做单机剧情，后加 4 人联机。
+## 方向
+
+- **玩法用 Godot 引擎做**（GDScript + 场景 + 资源），先做单机剧情。
+- **C++ 只用来搭服务器**，等单机能玩了再接。
 
 ## 现状
 
-**规则核心 + 线协议 + headless 服务器 + GDExtension 全部跑通。**
+**玩法还没开始写。** 目前仓库里有两样东西：
 
-- `md_selftest`（无网络）26 项断言全绿
-- `godot --headless --path godot` 在 Godot **4.7.2** 里进程内跑完一局，隐藏信息未泄露
-- `md_sim` 200 局基线见 [`docs/architecture.md`](docs/architecture.md)
+- [`docs/design-validation.md`](docs/design-validation.md) —— 规则设计已用蒙特卡洛验证过（四项实验）
+- `sim/` —— 那套验证脚本，纯 Python，任何时候都能复跑
 
-游戏本体（剧情、UI、演出）尚未开始。
+之前那套"规则全写在 C++ 里"的方案已经冻结到 [`reference/`](reference/README.md)，不再维护。
 
-## 核心机制
+## 核心机制（已验证过的部分）
 
 **记忆值**是唯一的核心数值，同时充当三种角色：
 
 - **命** —— 降到 0 即出局（清空记忆）
-- **情报** —— 攒到 5 解锁"我是好是坏"，到 8 解锁"我到底是谁"
+- **情报** —— 攒到 7 解锁"我是好是坏"，到 9 解锁"我到底是谁"
 - **货币** —— 出牌能抢回记忆，杀人能继承死者的记忆
 
 玩家只用两件事推理：**自己手牌的构成**说明"我是谁"，**别人打出的牌**说明"他是谁"。
@@ -30,69 +32,20 @@ Godot 4 开发，先做单机剧情，后加 4 人联机。
 
 | 路径 | 内容 |
 |---|---|
-| `core/` | **规则核心**，零依赖 C++20 静态库。不引用 Godot，不引用 socket |
-| `net/` | **线协议**（Command 解析 / PlayerView 编码）+ `Room` 会话层，同样不碰 socket |
-| `apps/md_sim/` | 批量对局模拟器，用于平衡性回归 |
-| `apps/md_selftest/` | 无网络端到端自检，26 项断言 |
-| `apps/md_server/` | headless 服务器，TCP + 换行分隔 JSON（薄壳，只做投递） |
-| `godot/` | Godot 4 工程 + GDExtension（单机进程内） |
-| `tools/fetch-godot-cpp.ps1` | 拉取 godot-cpp |
-| [`docs/architecture.md`](docs/architecture.md) | 架构、数据流、GDExtension 踩坑、实测基线、已知问题 |
-| [`docs/design-validation.md`](docs/design-validation.md) | 规则验证报告：四项模拟实验的结论、牌池权重表、定稿规则表 v0.1 |
-| `sim/` | 设计期的 Python 验证脚本（与 `core/` 独立，保留作对账用） |
+| `game/` | **Godot 4 工程**，玩法主战场（目前只有一个空场景） |
+| [`docs/design-validation.md`](docs/design-validation.md) | 规则验证报告、牌池权重表、定稿规则表 v0.1 |
+| `sim/` | 设计期的 Python 验证脚本 |
+| [`reference/`](reference/README.md) | 已冻结的 C++ 方案（含 200 局平衡基线，可查） |
 
-## 构建
+## 跑起来
 
-C++20，无第三方依赖。
+Godot 4.7 打开 `game/` 目录，或者：
 
 ```bash
-# 模拟器
-g++ -std=c++20 -O2 -I core/include core/src/*.cpp apps/md_sim/main.cpp -o build/md_sim
-./build/md_sim 200 1 8 7 9          # 局数 种子 最大轮数 阵营解锁 身份解锁
-./build/md_sim 400 1 8 6 9 --csv    # 扫参用，输出单行 CSV
-./build/md_sim 1 1 8 7 9 --trace    # 逐动作打印一局
-
-# 端到端自检
-g++ -std=c++20 -O2 -I core/include -I net/include \
-    core/src/*.cpp net/src/*.cpp apps/md_selftest/main.cpp -o build/md_selftest
-./build/md_selftest
-
-# headless 服务器（Windows 需额外 -lws2_32）
-g++ -std=c++20 -O2 -I core/include -I net/include \
-    core/src/*.cpp net/src/*.cpp apps/md_server/main.cpp -o build/md_server -lws2_32
-./build/md_server --port 24680 --seed 1 -v
+godot --path game
 ```
 
-也可以用 CMake：`cmake -B build && cmake --build build`。
-
-### Godot 客户端（GDExtension）
-
-```powershell
-powershell -File tools/fetch-godot-cpp.ps1        # 拉 godot-cpp，不进仓库
-
-cmake -S . -B build-gdext -G "Visual Studio 18 2026" -A x64 `
-      -DGODOTCPP_TARGET=template_release -DMD_BUILD_GDEXTENSION=ON
-cmake --build build-gdext --config Release
-
-godot --headless --path godot --import            # 首次导入，生成 extension_list.cfg
-godot --headless --path godot                     # 跑单机自检
-```
-
-预期输出：
-
-```
----- GDExtension 单机自检 ----
-views=9  my_turns=8  overs=1  leak=false
-  [ok] 进程内跑完一局，隐藏信息未泄露
-自检结果: PASS
-```
-
-> `.gdextension` 的两个坑（BOM、4.7 的标签格式）记在架构文档里，踩过一次就不用再踩。
-
-> ⚠️ 本机（Windows + Application Control）会拦截任何链接 `ws2_32` 的可执行文件，
-> 所以 `md_server.exe` 能编译但不能在本机运行。细节见架构文档。
-
-## 复跑验证
+## 规则验证（任何时候都能复跑）
 
 需要 Python 3.12 + numpy。
 
