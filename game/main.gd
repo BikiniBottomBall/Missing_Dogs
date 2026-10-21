@@ -1,13 +1,18 @@
 extends Node3D
 #
-# 第一版 3D 牌桌原型。
+# 3D 牌桌 demo。
 #
-# 刻意做得很丑：桌子是方块，人是胶囊，牌是薄片 + 3D 文字。
-# 这一版要验证的不是画面，而是 **牌桌循环能不能转起来**：
-#   点一张牌 -> 结算 -> 记忆值变化 -> 轮到别人 -> 一轮结束记忆全体 -1 -> 直到分出胜负
+# 刻意做得很丑：桌子是方块，人是胶囊，牌是薄片 + 3D 文字。要验的不是画面，
+# 是"这个循环好不好玩"：
 #
-# 你自己是座位 0。目标座位目前是自动挑的（杀伤/欺骗/调查打记忆最高的人，
-# 共感给记忆最低的人），因为"点牌再点人"的两段式交互留到下一版。
+#   抢枪（抢/躲/盯）-> 出牌或开枪 -> 记忆值变化 -> 一轮结束全体 -1
+#   -> 记忆到 7 知道自己是好是坏，到 9 知道是谁 -> 分出胜负
+#
+# 操作：
+#   抢枪阶段      点屏幕中间的三个按钮
+#   出牌          点一张牌；需要目标时座位会高亮，再点人
+#   开枪          持枪且第 2 轮起，右下角"开枪"按钮，再点人
+#   取消          再点任意一张牌
 #
 # 无头自检：godot --headless --path game -- --auto
 
@@ -20,20 +25,35 @@ const CARD_D := 0.13
 const PLAYER_SEAT := 0
 
 const CAT_COLORS := [
-	Color(0.35, 0.55, 0.85),  # 调查
-	Color(0.40, 0.70, 0.45),  # 掩护
-	Color(0.75, 0.65, 0.35),  # 追忆
-	Color(0.80, 0.45, 0.65),  # 共感
-	Color(0.80, 0.30, 0.30),  # 杀伤
-	Color(0.55, 0.35, 0.75),  # 欺骗
+	Color(0.35, 0.55, 0.85),
+	Color(0.40, 0.70, 0.45),
+	Color(0.75, 0.65, 0.35),
+	Color(0.80, 0.45, 0.65),
+	Color(0.80, 0.30, 0.30),
+	Color(0.55, 0.35, 0.75),
 ]
+const SEAT_IDLE := Color(0.50, 0.50, 0.55)
+const SEAT_SELF := Color(0.90, 0.80, 0.40)
+const SEAT_TARGET := Color(0.95, 0.35, 0.35)
 
 var rules: MDRules
 var hand_root: Node3D
+var seat_areas: Array = []
+var seat_meshes: Array = []
 var seat_labels: Array = []
 var status_label: Label
+var hint_label: Label
+var gather_box: VBoxContainer
+var shoot_button: Button
+
 var busy := false
 var auto_mode := false
+
+# 目标选择状态
+var selecting := false
+var select_mode := "card"  # "card" | "shoot"
+var select_card := -1
+var select_valid: Array = []
 
 
 func _ready() -> void:
@@ -48,7 +68,7 @@ func _ready() -> void:
 	if auto_mode:
 		_run_auto()
 	else:
-		_maybe_ai_turn()
+		_after_state_change()
 
 
 # ---------------------------------------------------------------- 场景搭建
@@ -56,16 +76,23 @@ func _ready() -> void:
 func _build_room() -> void:
 	var light := DirectionalLight3D.new()
 	light.rotation_degrees = Vector3(-55, -40, 0)
-	light.light_energy = 1.1
+	light.light_energy = 1.2
 	add_child(light)
 
+	var env := WorldEnvironment.new()
+	var e := Environment.new()
+	e.background_mode = Environment.BG_COLOR
+	e.background_color = Color(0.07, 0.07, 0.09)
+	e.ambient_light_color = Color(0.45, 0.45, 0.5)
+	e.ambient_light_energy = 0.8
+	env.environment = e
+	add_child(env)
+
 	var cam := Camera3D.new()
-	cam.position = Vector3(0, 1.05, 1.85)
-	cam.look_at_from_position(Vector3(0, 1.05, 1.85), Vector3(0, 0.05, 0))
+	cam.look_at_from_position(Vector3(0, 1.02, 1.9), Vector3(0, 0.05, 0))
 	cam.current = true
 	add_child(cam)
 
-	# 地板
 	var floor_mesh := MeshInstance3D.new()
 	var floor_box := BoxMesh.new()
 	floor_box.size = Vector3(8, 0.02, 8)
@@ -74,7 +101,6 @@ func _build_room() -> void:
 	floor_mesh.material_override = _mat(Color(0.10, 0.10, 0.12))
 	add_child(floor_mesh)
 
-	# 桌子
 	var table := MeshInstance3D.new()
 	var table_box := BoxMesh.new()
 	table_box.size = Vector3(1.7, 0.06, 1.7)
@@ -82,40 +108,103 @@ func _build_room() -> void:
 	table.material_override = _mat(Color(0.22, 0.17, 0.13))
 	add_child(table)
 
-	# 四个座位 + 记忆值标签
+	# 桌面中央那把枪
+	var gun := MeshInstance3D.new()
+	var gun_box := BoxMesh.new()
+	gun_box.size = Vector3(0.16, 0.03, 0.05)
+	gun.mesh = gun_box
+	gun.position = Vector3(0, 0.05, -0.12)
+	gun.material_override = _mat(Color(0.25, 0.25, 0.28))
+	add_child(gun)
+
 	for s in MDRules.SEATS:
 		var pos := _seat_position(s)
+
+		var area := Area3D.new()
+		area.position = pos + Vector3(0, 0.2, 0)
+		add_child(area)
+
+		var cs := CollisionShape3D.new()
+		var shape := CylinderShape3D.new()
+		shape.radius = 0.26
+		shape.height = 0.7
+		cs.shape = shape
+		area.add_child(cs)
 
 		var body := MeshInstance3D.new()
 		var cap := CapsuleMesh.new()
 		cap.radius = 0.12
 		cap.height = 0.42
 		body.mesh = cap
-		body.position = pos + Vector3(0, 0.18, 0)
-		body.material_override = _mat(Color(0.5, 0.5, 0.55) if s != PLAYER_SEAT else Color(0.9, 0.8, 0.4))
-		add_child(body)
+		body.material_override = _mat(SEAT_SELF if s == PLAYER_SEAT else SEAT_IDLE)
+		area.add_child(body)
+
+		area.input_event.connect(_on_seat_clicked.bind(s))
+		seat_areas.append(area)
+		seat_meshes.append(body)
 
 		var lbl := Label3D.new()
 		lbl.font_size = 48
 		lbl.pixel_size = 0.0016
 		lbl.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 		lbl.position = pos + Vector3(0, 0.62, 0)
-		lbl.text = ""
 		add_child(lbl)
 		seat_labels.append(lbl)
 
 	hand_root = Node3D.new()
-	hand_root.position = Vector3(0, 0.06, 0.52)
+	hand_root.position = Vector3(0, 0.06, 0.55)
 	add_child(hand_root)
 
 
 func _build_ui() -> void:
 	var layer := CanvasLayer.new()
 	add_child(layer)
+
 	status_label = Label.new()
-	status_label.position = Vector2(16, 12)
+	status_label.position = Vector2(18, 14)
 	status_label.add_theme_font_size_override("font_size", 18)
 	layer.add_child(status_label)
+
+	hint_label = Label.new()
+	hint_label.position = Vector2(18, 150)
+	hint_label.add_theme_font_size_override("font_size", 20)
+	hint_label.add_theme_color_override("font_color", Color(0.95, 0.8, 0.4))
+	layer.add_child(hint_label)
+
+	gather_box = VBoxContainer.new()
+	gather_box.anchor_left = 0.5
+	gather_box.anchor_top = 0.5
+	gather_box.anchor_right = 0.5
+	gather_box.anchor_bottom = 0.5
+	gather_box.offset_left = -70
+	gather_box.offset_top = 10
+	gather_box.offset_right = 70
+	gather_box.offset_bottom = 170
+	gather_box.alignment = BoxContainer.ALIGNMENT_CENTER
+	layer.add_child(gather_box)
+
+	var title := Label.new()
+	title.text = "桌上有枪。你只有一瞬间。"
+	title.add_theme_font_size_override("font_size", 22)
+	gather_box.add_child(title)
+	for i in MDRules.GATHER_NAMES.size():
+		var b := Button.new()
+		b.text = MDRules.GATHER_NAMES[i]
+		b.pressed.connect(_on_gather_pressed.bind(i))
+		gather_box.add_child(b)
+
+	shoot_button = Button.new()
+	shoot_button.text = "开枪"
+	shoot_button.anchor_left = 1.0
+	shoot_button.anchor_top = 1.0
+	shoot_button.anchor_right = 1.0
+	shoot_button.anchor_bottom = 1.0
+	shoot_button.offset_left = -110
+	shoot_button.offset_top = -60
+	shoot_button.offset_right = -20
+	shoot_button.offset_bottom = -24
+	shoot_button.pressed.connect(_on_shoot_pressed)
+	layer.add_child(shoot_button)
 
 
 func _mat(c: Color) -> StandardMaterial3D:
@@ -129,16 +218,19 @@ func _seat_position(s: int) -> Vector3:
 	return Vector3(sin(a) * SEAT_RADIUS, 0.0, cos(a) * SEAT_RADIUS)
 
 
-# ---------------------------------------------------------------- 渲染刷新
+# ---------------------------------------------------------------- 刷新
 
 func _refresh() -> void:
 	for s in MDRules.SEATS:
 		var p: Dictionary = rules.players[s]
-		var name_text := "你" if s == PLAYER_SEAT else "对手%d" % s
+		var who := "你" if s == PLAYER_SEAT else "对手%d" % s
+		var tags: Array = []
+		if s == rules.gun_holder and rules.bullets > 0:
+			tags.append("持枪")
 		if not p["alive"]:
-			seat_labels[s].text = "%s\n记忆 %d · 出局" % [name_text, maxi(p["memory"], 0)]
-		else:
-			seat_labels[s].text = "%s\n记忆 %d" % [name_text, p["memory"]]
+			tags.append("出局")
+		var suffix := "" if tags.is_empty() else " · " + " ".join(tags)
+		seat_labels[s].text = "%s\n记忆 %d%s" % [who, maxi(p["memory"], 0), suffix]
 
 	for child in hand_root.get_children():
 		child.queue_free()
@@ -151,33 +243,75 @@ func _refresh() -> void:
 		card.position = Vector3(x, 0.0, -absf(x) * 0.25)
 		hand_root.add_child(card)
 
-	_update_status()
+	_refresh_seat_colors()
+	_refresh_gather_panel()
+	_refresh_shoot_button()
+	_refresh_status()
 
 
-func _update_status() -> void:
+func _refresh_seat_colors() -> void:
+	for s in MDRules.SEATS:
+		var base: Color = SEAT_SELF if s == PLAYER_SEAT else SEAT_IDLE
+		if not rules.players[s]["alive"]:
+			base = Color(0.22, 0.22, 0.24)
+		elif selecting and s in select_valid:
+			base = SEAT_TARGET
+		(seat_meshes[s].material_override as StandardMaterial3D).albedo_color = base
+
+
+func _refresh_gather_panel() -> void:
+	gather_box.visible = rules.is_gather_pending()
+
+
+func _refresh_shoot_button() -> void:
+	var mine: bool = rules.gun_holder == PLAYER_SEAT
+	shoot_button.visible = mine and rules.bullets > 0 and not rules.is_over() and rules.can_shoot() \
+		and rules.current == PLAYER_SEAT
+
+
+func _refresh_status() -> void:
 	var p: Dictionary = rules.players[PLAYER_SEAT]
-	var lines := []
-	lines.append("第 %d / %d 轮" % [mini(rules.round_num, MDRules.MAX_ROUNDS), MDRules.MAX_ROUNDS])
-	lines.append("你的记忆 %d（阵营解锁 %d / 身份解锁 %d）" % [
-		p["memory"], MDRules.FACTION_UNLOCK, MDRules.IDENTITY_UNLOCK,
+	var lines: Array = []
+
+	if rules.is_gather_pending():
+		lines.append("抢枪阶段")
+	else:
+		lines.append("第 %d / %d 轮" % [mini(rules.round_num, MDRules.MAX_ROUNDS), MDRules.MAX_ROUNDS])
+	lines.append("你的记忆 %d   (阵营 %d / 身份 %d)" % [
+		maxi(p["memory"], 0), MDRules.FACTION_UNLOCK, MDRules.IDENTITY_UNLOCK,
 	])
+
+	if rules.gun_holder >= 0:
+		var who := "你" if rules.gun_holder == PLAYER_SEAT else "对手%d" % rules.gun_holder
+		lines.append("枪在%s手上，剩 %d 发" % [who, rules.bullets])
+
 	var know := rules.self_knowledge(PLAYER_SEAT)
-	if know == 0:
-		lines.append("自我认知：一片空白")
-	elif know == 1:
-		lines.append("自我认知：你隐约知道自己站在哪一边了")
-	else:
-		lines.append("自我认知：你想起了自己是谁")
-	if rules.over:
-		lines.append("")
-		lines.append("对局结束：" + ("好人胜" if rules.winner == 0 else "卧底胜"))
-	elif rules.current == PLAYER_SEAT:
-		lines.append("")
-		lines.append("轮到你了 —— 点一张牌打出")
-	else:
-		lines.append("")
-		lines.append("等待对手…")
+	match know:
+		0: lines.append("关于自己：一片空白")
+		1: lines.append("关于自己：你隐约知道自己站在哪一边")
+		2: lines.append("关于自己：你想起了自己是谁")
+
+	var peeked: Array = p["peeked"]
+	if not peeked.is_empty():
+		var names: Array = []
+		for c in peeked:
+			names.append(MDRules.CAT_NAMES[c])
+		lines.append("你盯到的一张牌：" + "、".join(names))
+
 	status_label.text = "\n".join(lines)
+
+	if rules.is_over():
+		hint_label.text = "对局结束 —— " + ("好人胜" if rules.winner == 0 else "卧底胜")
+	elif selecting:
+		hint_label.text = "点一个高亮的座位作为目标（再点任意一张牌可取消）"
+	elif rules.current == PLAYER_SEAT and rules.can_shoot():
+		hint_label.text = "轮到你了：出一张牌，或者开枪"
+	elif rules.current == PLAYER_SEAT:
+		hint_label.text = "轮到你了：点一张牌打出"
+	elif not rules.is_gather_pending():
+		hint_label.text = "等待对手…"
+	else:
+		hint_label.text = ""
 
 
 func _make_card(cat: int, index: int) -> Area3D:
@@ -202,7 +336,6 @@ func _make_card(cat: int, index: int) -> Area3D:
 	lbl.pixel_size = 0.0009
 	lbl.rotation_degrees = Vector3(-90, 0, 0)
 	lbl.position = Vector3(0, 0.006, 0)
-	lbl.modulate = Color(1, 1, 1)
 	area.add_child(lbl)
 
 	area.input_event.connect(_on_card_clicked.bind(index))
@@ -211,83 +344,176 @@ func _make_card(cat: int, index: int) -> Area3D:
 
 # ---------------------------------------------------------------- 交互
 
+func _on_gather_pressed(choice: int) -> void:
+	if not rules.is_gather_pending():
+		return
+	rules.set_gather(PLAYER_SEAT, choice)
+	for s in range(1, MDRules.SEATS):
+		rules.set_gather(s, AI_SCRIPT.choose_gather(rules, s))
+	_refresh()
+	_after_state_change()
+
+
+func _on_shoot_pressed() -> void:
+	if not rules.can_shoot() or rules.gun_holder != PLAYER_SEAT:
+		return
+	_begin_select("shoot")
+
+
 func _on_card_clicked(
 	_camera: Node, event: InputEvent, _pos: Vector3, _normal: Vector3, _shape: int, index: int
 ) -> void:
-	if busy or rules.over:
+	if busy or rules.is_over():
 		return
 	if not (event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT):
 		return
-	if rules.current != PLAYER_SEAT:
+	if rules.is_gather_pending():
 		return
-	_play_card(PLAYER_SEAT, index)
 
+	# 选择中再点牌 = 取消
+	if selecting:
+		_cancel_select()
+		_refresh()
+		return
 
-func _auto_target(seat: int, cat: int) -> int:
-	if cat == MDRules.Cat.EMPATHY:
-		return rules.lowest_memory_other(seat)
-	return rules.highest_memory_opponent(seat)
+	if rules.current != PLAYER_SEAT or not rules.can_act(PLAYER_SEAT):
+		return
 
-
-func _play_card(seat: int, index: int) -> void:
-	var hand: Array = rules.players[seat]["hand"]
+	var hand: Array = rules.players[PLAYER_SEAT]["hand"]
 	if index < 0 or index >= hand.size():
 		return
 	var cat: int = hand[index]["cat"]
-	var target := -1
+
 	if rules.card_needs_target(cat):
-		target = _auto_target(seat, cat)
+		_begin_select("card", index)
+		_refresh()
+		return
 
 	busy = true
-	rules.play(seat, index, target)
-	_refresh()
+	rules.play(PLAYER_SEAT, index, -1)
 	busy = false
-	_maybe_ai_turn()
+	_refresh()
+	_after_state_change()
 
 
-func _maybe_ai_turn() -> void:
-	if auto_mode:
+func _on_seat_clicked(
+	_camera: Node, event: InputEvent, _pos: Vector3, _normal: Vector3, _shape: int, seat: int
+) -> void:
+	if not selecting or busy:
 		return
-	if rules.over or rules.current == PLAYER_SEAT:
+	if not (event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT):
 		return
+	if not (seat in select_valid):
+		return
+
+	var mode := select_mode
+	var card := select_card
+	_cancel_select()
+	busy = true
+
+	if mode == "shoot":
+		rules.shoot(seat)
+	else:
+		rules.play(PLAYER_SEAT, card, seat)
+
+	busy = false
+	_refresh()
+	_after_state_change()
+
+
+func _begin_select(mode: String, card_index: int = -1) -> void:
+	selecting = true
+	select_mode = mode
+	select_card = card_index
+	select_valid = []
+	for s in rules.alive_seats():
+		if s != PLAYER_SEAT:
+			select_valid.append(s)
+
+
+func _cancel_select() -> void:
+	selecting = false
+	select_mode = "card"
+	select_card = -1
+	select_valid = []
+
+
+# ---------------------------------------------------------------- 回合推进
+
+func _after_state_change() -> void:
+	if auto_mode or rules.is_over():
+		return
+	if rules.is_gather_pending():
+		return
+	if rules.current == PLAYER_SEAT:
+		return
+	_ai_step()
+
+
+func _ai_step() -> void:
 	busy = true
 	await get_tree().create_timer(0.45).timeout
 	busy = false
-	if rules.over:
+	if rules.is_over() or rules.current == PLAYER_SEAT:
 		return
+
 	var seat: int = rules.current
+
+	# 持枪者先看要不要开枪
+	if rules.can_shoot() and rules.gun_holder == seat:
+		var tgt: int = AI_SCRIPT.choose_shoot(rules)
+		if tgt >= 0:
+			rules.shoot(tgt)
+			_refresh()
+			_after_state_change()
+			return
+
 	var choice: Dictionary = AI_SCRIPT.choose(rules, seat)
-	var ok: bool = false
+	var ok := false
 	if choice["index"] >= 0:
 		ok = rules.play(seat, choice["index"], choice["target"])
 	if not ok:
-		# AI 打不出牌（理论上不该发生）：直接标记它这轮已行动，避免卡死
-		rules.players[seat]["acted"] = true
-		rules._advance()
+		players_mark_acted(seat)
 	_refresh()
-	_maybe_ai_turn()
+	_after_state_change()
+
+
+func players_mark_acted(seat: int) -> void:
+	# 兜底：某座位打不出牌时不要让整局卡死
+	rules.players[seat]["acted"] = true
+	rules._advance()
 
 
 # ---------------------------------------------------------------- 无头自检
 
 func _run_auto() -> void:
+	if rules.is_gather_pending():
+		for s in MDRules.SEATS:
+			rules.set_gather(s, AI_SCRIPT.choose_gather(rules, s))
+
 	var guard := 0
-	while not rules.over and guard < 4000:
+	while not rules.is_over() and guard < 6000:
 		guard += 1
 		var seat: int = rules.current
+		if rules.can_shoot() and rules.gun_holder == seat:
+			var tgt: int = AI_SCRIPT.choose_shoot(rules)
+			if tgt >= 0 and rules.shoot(tgt):
+				continue
 		var choice: Dictionary = AI_SCRIPT.choose(rules, seat)
-		var ok: bool = false
+		var ok := false
 		if choice["index"] >= 0:
 			ok = rules.play(seat, choice["index"], choice["target"])
 		if not ok:
-			rules.players[seat]["acted"] = true
-			rules._advance()
-	print("AUTO_RESULT winner=%d rounds=%d guard=%d" % [rules.winner, rules.round_num, guard])
+			players_mark_acted(seat)
+
+	print("AUTO_RESULT winner=%d rounds=%d guard=%d gun_holder=%d bullets=%d" % [
+		rules.winner, rules.round_num, guard, rules.gun_holder, rules.bullets,
+	])
 	for s in MDRules.SEATS:
 		var p: Dictionary = rules.players[s]
 		print("  seat %d ident=%s memory=%d alive=%s" % [
-			s, MDRules.IDENT_NAMES[p["ident"]], p["memory"], str(p["alive"]),
+			s, MDRules.IDENT_NAMES[p["ident"]], maxi(p["memory"], 0), str(p["alive"]),
 		])
 	_refresh()
 	await get_tree().process_frame
-	get_tree().quit(0 if rules.over else 1)
+	get_tree().quit(0 if rules.is_over() else 1)

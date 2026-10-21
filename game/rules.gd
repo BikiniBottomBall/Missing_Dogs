@@ -3,6 +3,11 @@ extends RefCounted
 #
 # 纯规则层：不引用任何节点、不碰渲染，因此可以无头跑、可以单测。
 # 数值来自 docs/design-validation.md（已经过蒙特卡洛验证的那一版）。
+#
+# 一局的流程：
+#   GATHER  抢枪。四人同时选 抢 / 躲 / 盯，结算出持枪人
+#   PLAY    从持枪人起顺时针，每人出一张牌；持枪人可以用"开枪"代替出牌
+#   OVER    分出胜负
 
 const SEATS := 4
 const MEMORY_START := 4
@@ -11,12 +16,16 @@ const FACTION_UNLOCK := 7
 const IDENTITY_UNLOCK := 9
 const MAX_ROUNDS := 8
 const HAND_CAP := 7
+const GUN_FROM_ROUND := 2  # 数值门槛不成立（记忆涨太快），改用结构条件
 
 enum Cat { INVESTIGATE, COVER, REMINISCE, EMPATHY, HARM, DECEIVE }
 enum Ident { HUNTER, WITNESS, RESCUER, MOLE }
+enum Phase { GATHER, PLAY, OVER }
+enum Gather { GRAB, DODGE, WATCH }
 
 const CAT_NAMES := ["调查", "掩护", "追忆", "共感", "杀伤", "欺骗"]
 const IDENT_NAMES := ["追捕者", "目击者", "救援者", "卧底"]
+const GATHER_NAMES := ["抢枪", "躲开", "盯着"]
 
 # 前三位是三个好人子身份，第四位是卧底。列顺序同 Cat。
 const POOLS := [
@@ -25,7 +34,6 @@ const POOLS := [
 	[12, 16, 38, 18, 8, 10],
 	[12, 12, 15, 6, 28, 22],
 ]
-# 通用牌：与身份无关，不泄露信息
 const UTILITY := [20, 25, 20, 10, 10, 15]
 
 var rng := RandomNumberGenerator.new()
@@ -33,17 +41,26 @@ var round_num := 0
 var players: Array = []
 var current := 0
 var history: Array = []
-var over := false
+var phase: int = Phase.GATHER
 var winner := -1  # 0 好人胜 / 1 卧底胜 / -1 未结束
+
+var gun_holder := -1
+var bullets := 0
+var gather_choice: Array = []
+var gather_done := 0
 
 
 func setup(seed_value: int) -> void:
 	rng.seed = seed_value
 	players.clear()
 	history.clear()
-	over = false
+	phase = Phase.GATHER
 	winner = -1
-	round_num = 1
+	round_num = 0
+	gun_holder = -1
+	bullets = 0
+	gather_choice = []
+	gather_done = 0
 
 	var idents := [Ident.HUNTER, Ident.WITNESS, Ident.RESCUER, Ident.MOLE]
 	for i in range(idents.size() - 1, 0, -1):
@@ -60,13 +77,16 @@ func setup(seed_value: int) -> void:
 			"hand": [],
 			"shield": 0,
 			"acted": false,
+			"peeked": [],
 		})
 
 	for s in SEATS:
 		_draw(s, 3, 0.0)
 		_draw(s, 2, 1.0)
 
-	current = _first_alive()
+	gather_choice.resize(SEATS)
+	for s in SEATS:
+		gather_choice[s] = -1
 
 
 # ---------------------------------------------------------------- 抽牌
@@ -94,14 +114,69 @@ func _weighted(weights: Array) -> int:
 	return weights.size() - 1
 
 
-# ---------------------------------------------------------------- 回合
+# ---------------------------------------------------------------- 抢枪
+
+func is_gather_pending() -> bool:
+	return phase == Phase.GATHER
+
+
+func set_gather(seat: int, choice: int) -> bool:
+	if phase != Phase.GATHER:
+		return false
+	if seat < 0 or seat >= SEATS or choice < 0 or choice > 2:
+		return false
+	if gather_choice[seat] >= 0:
+		return false
+	gather_choice[seat] = choice
+	gather_done += 1
+	if gather_done >= SEATS:
+		_resolve_gather()
+	return true
+
+
+func _resolve_gather() -> void:
+	var grabbers: Array = []
+	for s in SEATS:
+		if gather_choice[s] == Gather.GRAB:
+			grabbers.append(s)
+
+	# 没人抢也要落到一个人手里：每局必有枪
+	gun_holder = grabbers[rng.randi_range(0, grabbers.size() - 1)] if grabbers.size() > 0 else rng.randi_range(0, SEATS - 1)
+	bullets = 1
+
+	for s in SEATS:
+		match gather_choice[s]:
+			Gather.DODGE:
+				players[s]["memory"] = mini(players[s]["memory"] + 1, MEMORY_CAP)
+			Gather.WATCH:
+				var src: Array = players[gun_holder]["hand"]
+				if src.size() > 0:
+					var i := rng.randi_range(0, src.size() - 1)
+					players[s]["peeked"].append(src[i]["cat"])
+
+	round_num = 1
+	phase = Phase.PLAY
+	for s in SEATS:
+		players[s]["acted"] = false
+	current = gun_holder
+
+
+# ---------------------------------------------------------------- 出牌
 
 func can_act(seat: int) -> bool:
-	return not over and players[seat]["alive"] and not players[seat]["acted"]
+	return phase == Phase.PLAY and players[seat]["alive"] and not players[seat]["acted"]
 
 
 func card_needs_target(cat: int) -> bool:
 	return cat in [Cat.INVESTIGATE, Cat.EMPATHY, Cat.HARM, Cat.DECEIVE]
+
+
+func can_shoot() -> bool:
+	if phase != Phase.PLAY or bullets <= 0 or gun_holder < 0:
+		return false
+	if not players[gun_holder]["alive"]:
+		return false
+	return round_num >= GUN_FROM_ROUND and not players[gun_holder]["acted"]
 
 
 func play(seat: int, hand_index: int, target: int) -> bool:
@@ -121,9 +196,27 @@ func play(seat: int, hand_index: int, target: int) -> bool:
 		target = -1
 
 	p["hand"].remove_at(hand_index)
-	history.append({"seat": seat, "round": round_num, "cat": cat})
+	history.append({"seat": seat, "round": round_num, "cat": cat, "kind": "card"})
 	_apply(seat, cat, target)
 	p["acted"] = true
+	_advance()
+	return true
+
+
+func shoot(target: int) -> bool:
+	if not can_shoot():
+		return false
+	if target < 0 or target >= SEATS or target == gun_holder or not players[target]["alive"]:
+		return false
+
+	var me: Dictionary = players[gun_holder]
+	bullets -= 1
+	# 死者的记忆涌入开枪者
+	me["memory"] = mini(me["memory"] + 3, MEMORY_CAP)
+	history.append({"seat": gun_holder, "round": round_num, "cat": -1, "kind": "shoot"})
+	players[target]["alive"] = false
+	players[target]["memory"] = 0
+	me["acted"] = true
 	_advance()
 	return true
 
@@ -173,7 +266,6 @@ func _advance() -> void:
 
 
 func _finish_round() -> void:
-	# 失忆会退：每轮结束全体 −1
 	for s in SEATS:
 		var p: Dictionary = players[s]
 		if not p["alive"]:
@@ -229,12 +321,16 @@ func _check_over() -> bool:
 
 func _finish(w: int) -> void:
 	winner = w
-	over = true
+	phase = Phase.OVER
 
 
 # ---------------------------------------------------------------- 查询
 
-## 某个座位解锁了什么程度的自我认知
+func is_over() -> bool:
+	return phase == Phase.OVER
+
+
+## 某个座位解锁了什么程度的自我认知：0 空白 / 1 知道阵营 / 2 知道身份
 func self_knowledge(seat: int) -> int:
 	var m: int = players[seat]["memory"]
 	if m >= IDENTITY_UNLOCK:

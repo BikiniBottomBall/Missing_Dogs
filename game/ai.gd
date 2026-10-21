@@ -5,7 +5,34 @@ extends RefCounted
 # 以后要换人格、换策略，只改这一个文件。
 
 
-## 返回 {"index": 手牌下标, "target": 目标座位}；-1 表示没有可打的牌
+## 抢枪阶段选什么：0 抢 / 1 躲 / 2 盯
+static func choose_gather(rules: MDRules, seat: int) -> int:
+	var mem: int = rules.players[seat]["memory"]
+	var r := rules.rng.randf()
+	if mem <= 4:
+		return MDRules.Gather.DODGE   # 记忆太薄，先自保
+	if r < 0.60:
+		return MDRules.Gather.GRAB
+	if r < 0.85:
+		return MDRules.Gather.WATCH
+	return MDRules.Gather.DODGE
+
+
+## 拿到枪之后要不要开、打谁。返回 -1 表示不开。
+static func choose_shoot(rules: MDRules) -> int:
+	if not rules.can_shoot():
+		return -1
+	var holder: int = rules.gun_holder
+	var best := rules.highest_memory_opponent(holder)
+	if best < 0:
+		return -1
+	# 只打"快要想起自己是谁"的人，或者拖到中盘还没打过
+	if rules.players[best]["memory"] >= MDRules.FACTION_UNLOCK or rules.round_num >= 5:
+		return best
+	return -1
+
+
+## 出牌：返回 {"index": 手牌下标, "target": 目标座位}
 static func choose(rules: MDRules, seat: int) -> Dictionary:
 	var p: Dictionary = rules.players[seat]
 	var hand: Array = p["hand"]
