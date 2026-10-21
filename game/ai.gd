@@ -6,16 +6,12 @@ extends RefCounted
 
 
 ## 抢枪阶段选什么：0 抢 / 1 躲 / 2 盯
-static func choose_gather(rules: MDRules, seat: int) -> int:
-	var mem: int = rules.players[seat]["memory"]
-	var r := rules.rng.randf()
-	if mem <= 4:
-		return MDRules.Gather.DODGE   # 记忆太薄，先自保
-	if r < 0.60:
-		return MDRules.Gather.GRAB
-	if r < 0.85:
-		return MDRules.Gather.WATCH
-	return MDRules.Gather.DODGE
+##
+## 第一版直接均匀随机。这样统计出来的是"乱选会怎样"，是个没有偏见的基线；
+## 之前写死的启发式（记忆<=4 就躲）在开局记忆正好是 4 时会永远返回"躲"，
+## 结果抢枪阶段形同虚设。等真人有实测数据再决定该不该给 AI 加策略。
+static func choose_gather(rules: MDRules, _seat: int) -> int:
+	return rules.rng.randi_range(0, 2)
 
 
 ## 拿到枪之后要不要开、打谁。返回 -1 表示不开。

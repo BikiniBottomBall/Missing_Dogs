@@ -48,6 +48,8 @@ var gun_holder := -1
 var bullets := 0
 var gather_choice: Array = []
 var gather_done := 0
+var mem_deaths := 0
+var gun_deaths := 0
 
 
 func setup(seed_value: int) -> void:
@@ -61,7 +63,8 @@ func setup(seed_value: int) -> void:
 	bullets = 0
 	gather_choice = []
 	gather_done = 0
-
+	mem_deaths = 0
+	gun_deaths = 0
 	var idents := [Ident.HUNTER, Ident.WITNESS, Ident.RESCUER, Ident.MOLE]
 	for i in range(idents.size() - 1, 0, -1):
 		var j := rng.randi_range(0, i)
@@ -213,9 +216,10 @@ func shoot(target: int) -> bool:
 	bullets -= 1
 	# 死者的记忆涌入开枪者
 	me["memory"] = mini(me["memory"] + 3, MEMORY_CAP)
-	history.append({"seat": gun_holder, "round": round_num, "cat": -1, "kind": "shoot"})
+	history.append({"seat": gun_holder, "round": round_num, "cat": -1, "kind": "shoot", "target": target})
 	players[target]["alive"] = false
 	players[target]["memory"] = 0
+	gun_deaths += 1
 	me["acted"] = true
 	_advance()
 	return true
@@ -274,6 +278,7 @@ func _finish_round() -> void:
 		p["memory"] -= 1
 		if p["memory"] <= 0:
 			p["alive"] = false
+			mem_deaths += 1
 
 	if _check_over():
 		return

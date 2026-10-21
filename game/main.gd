@@ -64,6 +64,16 @@ var select_valid: Array = []
 
 
 func _ready() -> void:
+	# 批量统计模式：不起场景，只跑规则 + AI，用来看平衡
+	var args := OS.get_cmdline_user_args()
+	if "--batch" in args:
+		var n := 500
+		var bi := args.find("--batch")
+		if bi >= 0 and bi + 1 < args.size():
+			n = int(args[bi + 1])
+		_run_batch(n)
+		return
+
 	# 重复进入（编辑器里重新加载脚本）时先把上次生成的清掉，避免叠一层
 	var old := get_node_or_null("GEN")
 	if old != null:
@@ -512,6 +522,133 @@ func players_mark_acted(seat: int) -> void:
 
 
 # ---------------------------------------------------------------- 无头自检
+
+## 用 AI 把一局跑完，返回步数（用来发现死循环）
+func _simulate(r: MDRules) -> int:
+	if r.is_gather_pending():
+		for s in MDRules.SEATS:
+			r.set_gather(s, AI_SCRIPT.choose_gather(r, s))
+
+	var guard := 0
+	while not r.is_over() and guard < 6000:
+		guard += 1
+		var seat: int = r.current
+		if r.can_shoot() and r.gun_holder == seat:
+			var tgt: int = AI_SCRIPT.choose_shoot(r)
+			if tgt >= 0 and r.shoot(tgt):
+				continue
+		var choice: Dictionary = AI_SCRIPT.choose(r, seat)
+		var ok := false
+		if choice["index"] >= 0:
+			ok = r.play(seat, choice["index"], choice["target"])
+		if not ok:
+			r.players[seat]["acted"] = true
+			r._advance()
+	return guard
+
+
+func _run_batch(n: int) -> void:
+	var good := 0
+	var mole := 0
+	var stuck := 0
+	var rounds_sum := 0
+	var timeout_games := 0
+	var mem_deaths := 0
+	var gun_deaths := 0
+	var shots := 0
+	var hit_mole := 0
+	var hit_good := 0
+	var gather_counts := [0, 0, 0]
+	var got_faction := 0
+	var got_identity := 0
+	var player_died := 0
+	var t0 := Time.get_ticks_msec()
+
+	for i in n:
+		var r: MDRules = RULES_SCRIPT.new()
+		r.setup(i * 7919 + 1)
+
+		_simulate(r)
+
+		# 抢枪分布要在结算之后再读，否则 gather_choice 还是 -1
+		for s in MDRules.SEATS:
+			gather_counts[r.gather_choice[s]] += 1
+
+		if r.is_over():
+			if r.winner == 0:
+				good += 1
+			else:
+				mole += 1
+		else:
+			stuck += 1
+		rounds_sum += r.round_num
+		if r.round_num >= MDRules.MAX_ROUNDS:
+			timeout_games += 1
+		mem_deaths += r.mem_deaths
+		gun_deaths += r.gun_deaths
+		if not r.players[PLAYER_SEAT]["alive"]:
+			player_died += 1
+
+		var any_f := false
+		var any_i := false
+		for s in MDRules.SEATS:
+			var m: int = r.players[s]["memory"]
+			if m >= MDRules.IDENTITY_UNLOCK:
+				any_i = true
+			if m >= MDRules.FACTION_UNLOCK:
+				any_f = true
+		if any_f:
+			got_faction += 1
+		if any_i:
+			got_identity += 1
+
+		for h in r.history:
+			if h["kind"] == "shoot":
+				shots += 1
+				if r.players[h["target"]]["ident"] == MDRules.Ident.MOLE:
+					hit_mole += 1
+				else:
+					hit_good += 1
+
+	var ms := Time.get_ticks_msec() - t0
+	var f := float(n)
+	print("===== %d 局 AI 自对局 =====" % n)
+	print("耗时 %d ms" % ms)
+	print("")
+	print("【胜负】")
+	print("  好人胜 %.1f%%" % (float(good) / f * 100.0))
+	print("  卧底胜 %.1f%%" % (float(mole) / f * 100.0))
+	if stuck > 0:
+		print("  卡住（未结束） %d 局" % stuck)
+	print("")
+	print("【长度】")
+	print("  平均 %.2f 轮" % (float(rounds_sum) / f))
+	print("  打满 %d 轮的局 %.1f%%" % [MDRules.MAX_ROUNDS, float(timeout_games) / f * 100.0])
+	print("")
+	print("【死亡】")
+	print("  记忆清零 %.2f 人/局" % (float(mem_deaths) / f))
+	print("  枪杀     %.2f 人/局" % (float(gun_deaths) / f))
+	print("  你（座位0）出局率 %.1f%%" % (float(player_died) / f * 100.0))
+	print("")
+	print("【枪】")
+	print("  开枪 %.2f 次/局" % (float(shots) / f))
+	if shots > 0:
+		print("  命中卧底 %.1f%%（打中卧底 %d / 打死好人 %d）" % [
+			float(hit_mole) / float(shots) * 100.0, hit_mole, hit_good,
+		])
+	print("")
+	print("【抢枪阶段的选择分布】")
+	var total_choices := n * MDRules.SEATS
+	for i in 3:
+		print("  %s %.1f%%" % [
+			MDRules.GATHER_NAMES[i], float(gather_counts[i]) / float(total_choices) * 100.0,
+		])
+	print("")
+	print("【自我认知】")
+	print("  有人解锁阵营（记忆>=%d）的局 %.1f%%" % [MDRules.FACTION_UNLOCK, float(got_faction) / f * 100.0])
+	print("  有人解锁身份（记忆>=%d）的局 %.1f%%" % [MDRules.IDENTITY_UNLOCK, float(got_identity) / f * 100.0])
+	get_tree().quit(0)
+
 
 func _run_auto() -> void:
 	if rules.is_gather_pending():
