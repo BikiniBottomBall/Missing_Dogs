@@ -79,54 +79,53 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Get-ChildItem godot/addons/md_core/bin
 
-      - name: 下载 Godot 4.7 headless
+      - name: Godot 下载 + 导入 + 客户端自检（单步完成，避免跨步传变量）
         shell: pwsh
         run: |
-          $rels = Invoke-RestMethod "https://api.github.com/repos/godotengine/godot/releases?per_page=40"
-          $pick = $rels | Where-Object { $_.tag_name -match '^4\.7\.\d+-stable$' } | Select-Object -First 1
-          if (-not $pick) {
-            $pick = $rels | Where-Object { $_.tag_name -match '^4\.\d+\.\d+-stable$' } | Select-Object -First 1
+          $ErrorActionPreference = "Stop"
+          try {
+            Write-Host "::warning::进入 Godot 环节，先看看构建产物"
+            Get-ChildItem godot/addons/md_core/bin -ErrorAction SilentlyContinue | Select-Object Name, Length
+            Get-ChildItem build-gdext/Release -Filter *.exe -ErrorAction SilentlyContinue | Select-Object Name
+
+            # --- 下载 ---
+            $rels = Invoke-RestMethod "https://api.github.com/repos/godotengine/godot/releases?per_page=40"
+            $pick = $rels | Where-Object { $_.tag_name -match '^4\.7\.\d+-stable$' } | Select-Object -First 1
+            if (-not $pick) {
+              $pick = $rels | Where-Object { $_.tag_name -match '^4\.\d+\.\d+-stable$' } | Select-Object -First 1
+            }
+            Write-Host "选用 Godot: $($pick.tag_name)"
+            $asset = $pick.assets | Where-Object { $_.name -like '*win64.exe.zip' } | Select-Object -First 1
+            if (-not $asset) { throw "该 release 没有 win64.exe.zip 资源" }
+            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile godot.zip
+            Expand-Archive godot.zip -DestinationPath godot-bin -Force
+            $exe = (Get-ChildItem godot-bin -Filter *.exe -Recurse | Select-Object -First 1).FullName
+            if (-not $exe) { throw "解压后找不到 exe" }
+            Write-Host "引擎: $exe"
+
+            # --- 导入 ---
+            $proj = Join-Path $env:GITHUB_WORKSPACE "godot"
+            Write-Host "工程: $proj"
+            $out = & $exe --headless --path $proj --import 2>&1
+            $code = $LASTEXITCODE
+            $out | Select-Object -Last 25
+            Write-Host "import exit code: $code"
+            Write-Host "--- .godot 目录 ---"
+            Get-ChildItem (Join-Path $proj ".godot") -ErrorAction SilentlyContinue | Select-Object Name
+
+            # --- 自检 ---
+            $stdio = "build-gdext/Release/md_stdio.exe"
+            if (Test-Path $stdio) { $env:MD_STDIO_EXE = (Resolve-Path $stdio).Path }
+            Write-Host "MD_STDIO_EXE=$env:MD_STDIO_EXE"
+            & $exe --headless --path $proj
+            $rc = $LASTEXITCODE
+            Write-Host "selftest exit: $rc"
+            if ($rc -ne 0) { throw "客户端自检失败，exit=$rc" }
           }
-          Write-Host "选用 Godot: $($pick.tag_name)"
-          $asset = $pick.assets | Where-Object { $_.name -like '*win64.exe.zip' } | Select-Object -First 1
-          if (-not $asset) { Write-Host "::error::找不到 win64 资源"; exit 1 }
-          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile godot.zip
-          Expand-Archive godot.zip -DestinationPath godot-bin -Force
-          $exe = Get-ChildItem godot-bin -Filter *.exe -Recurse | Select-Object -First 1
-          if (-not $exe) { Write-Host "::error::解压后没有 exe"; exit 1 }
-          Write-Host "Godot exe: $($exe.FullName)"
-          echo "GODOT_EXE=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      - name: Godot 首次导入（生成 extension_list.cfg）
-        shell: pwsh
-        run: |
-          if (-not $env:GODOT_EXE) { Write-Host "::error::GODOT_EXE 为空"; exit 1 }
-          if (-not (Test-Path $env:GODOT_EXE)) { Write-Host "::error::GODOT_EXE 指向的文件不存在: $env:GODOT_EXE"; exit 1 }
-          $proj = Join-Path $env:GITHUB_WORKSPACE "godot"
-          Write-Host "引擎: $env:GODOT_EXE"
-          Write-Host "工程: $proj"
-
-          $out = & $env:GODOT_EXE --headless --path $proj --import 2>&1
-          $code = $LASTEXITCODE
-          $out | Select-Object -Last 20
-          Write-Host "import exit code: $code"
-
-          $cfg = Join-Path $proj ".godot/extension_list.cfg"
-          if (-not (Test-Path $cfg)) {
-            $tail = ($out | Select-Object -Last 6) -join " || "
-            Write-Host "::error::没有生成 extension_list.cfg（import exit=$code）。输出尾部: $tail"
-            Write-Host "--- .godot 内容 ---"
-            Get-ChildItem (Join-Path $proj ".godot") -ErrorAction SilentlyContinue
+          catch {
+            $msg = "$($_.Exception.GetType().Name): $($_.Exception.Message)"
+            $msg = $msg -replace "[\r\n]+", " "
+            if ($msg.Length -gt 350) { $msg = $msg.Substring(0, 350) }
+            Write-Host "::error::$msg"
             exit 1
           }
-          Write-Host "extension_list.cfg:"
-          Get-Content $cfg
-
-      - name: 客户端层自检（transport 三项应真跑）
-        shell: pwsh
-        run: |
-          $stdio = "build-gdext/Release/md_stdio.exe"
-          if (Test-Path $stdio) { $env:MD_STDIO_EXE = (Resolve-Path $stdio).Path }
-          if (Test-Path "build-gdext/Release/md_server.exe") { Write-Host "md_server 也在" }
-          & $env:GODOT_EXE --headless --path godot
-          if ($LASTEXITCODE -ne 0) { exit 1 }
