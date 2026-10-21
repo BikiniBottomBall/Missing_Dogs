@@ -1,7 +1,13 @@
+@tool
 extends Node3D
 #
 # 3D 牌桌 demo。
 #
+# 注意：这个场景是**纯代码生成**的。main.tscn 里只有一个空 Node3D + 这个脚本，
+# 桌子/座位/灯光都在 _ready() 里建出来。所以加了 @tool —— 否则编辑器里打开
+# 是一片空白，只有按 F5 才看得到东西。
+#
+# 编辑器里只搭静态部分（桌子、四个座位、那把枪），不跑对局；
 # 刻意做得很丑：桌子是方块，人是胶囊，牌是薄片 + 3D 文字。要验的不是画面，
 # 是"这个循环好不好玩"：
 #
@@ -37,6 +43,7 @@ const SEAT_SELF := Color(0.90, 0.80, 0.40)
 const SEAT_TARGET := Color(0.95, 0.35, 0.35)
 
 var rules: MDRules
+var _root: Node3D          # 所有程序化生成的节点都挂在这下面
 var hand_root: Node3D
 var seat_areas: Array = []
 var seat_meshes: Array = []
@@ -57,10 +64,28 @@ var select_valid: Array = []
 
 
 func _ready() -> void:
-	auto_mode = "--auto" in OS.get_cmdline_user_args()
+	# 重复进入（编辑器里重新加载脚本）时先把上次生成的清掉，避免叠一层
+	var old := get_node_or_null("GEN")
+	if old != null:
+		remove_child(old)
+		old.queue_free()
+	_root = Node3D.new()
+	_root.name = "GEN"
+	self.add_child(_root)
+
 	_build_room()
 	_build_ui()
 
+	if Engine.is_editor_hint():
+		# 编辑器里只摆静态场景。手牌和状态文字依赖对局状态，不生成。
+		gather_box.visible = false
+		shoot_button.visible = false
+		for s in MDRules.SEATS:
+			var who := "你" if s == PLAYER_SEAT else "对手%d" % s
+			seat_labels[s].text = "%s\n记忆 --" % who
+		return
+
+	auto_mode = "--auto" in OS.get_cmdline_user_args()
 	rules = RULES_SCRIPT.new()
 	rules.setup(randi())
 
@@ -77,7 +102,7 @@ func _build_room() -> void:
 	var light := DirectionalLight3D.new()
 	light.rotation_degrees = Vector3(-55, -40, 0)
 	light.light_energy = 1.2
-	add_child(light)
+	_root.add_child(light)
 
 	var env := WorldEnvironment.new()
 	var e := Environment.new()
@@ -86,12 +111,14 @@ func _build_room() -> void:
 	e.ambient_light_color = Color(0.45, 0.45, 0.5)
 	e.ambient_light_energy = 0.8
 	env.environment = e
-	add_child(env)
+	_root.add_child(env)
 
 	var cam := Camera3D.new()
 	cam.look_at_from_position(Vector3(0, 1.02, 1.9), Vector3(0, 0.05, 0))
-	cam.current = true
-	add_child(cam)
+	# 编辑器里不要 current，否则 3D 视口会被这个相机接管，没法自由观察
+	if not Engine.is_editor_hint():
+		cam.current = true
+	_root.add_child(cam)
 
 	var floor_mesh := MeshInstance3D.new()
 	var floor_box := BoxMesh.new()
@@ -99,14 +126,14 @@ func _build_room() -> void:
 	floor_mesh.mesh = floor_box
 	floor_mesh.position = Vector3(0, -0.5, 0)
 	floor_mesh.material_override = _mat(Color(0.10, 0.10, 0.12))
-	add_child(floor_mesh)
+	_root.add_child(floor_mesh)
 
 	var table := MeshInstance3D.new()
 	var table_box := BoxMesh.new()
 	table_box.size = Vector3(1.7, 0.06, 1.7)
 	table.mesh = table_box
 	table.material_override = _mat(Color(0.22, 0.17, 0.13))
-	add_child(table)
+	_root.add_child(table)
 
 	# 桌面中央那把枪
 	var gun := MeshInstance3D.new()
@@ -115,7 +142,7 @@ func _build_room() -> void:
 	gun.mesh = gun_box
 	gun.position = Vector3(0, 0.05, -0.12)
 	gun.material_override = _mat(Color(0.25, 0.25, 0.28))
-	add_child(gun)
+	_root.add_child(gun)
 
 	for s in MDRules.SEATS:
 		var pos := _seat_position(s)
@@ -153,12 +180,12 @@ func _build_room() -> void:
 
 	hand_root = Node3D.new()
 	hand_root.position = Vector3(0, 0.06, 0.55)
-	add_child(hand_root)
+	_root.add_child(hand_root)
 
 
 func _build_ui() -> void:
 	var layer := CanvasLayer.new()
-	add_child(layer)
+	_root.add_child(layer)
 
 	status_label = Label.new()
 	status_label.position = Vector2(18, 14)
