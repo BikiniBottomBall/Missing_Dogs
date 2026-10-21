@@ -29,6 +29,8 @@ func _ready() -> void:
 	if skips > 0:
 		print("（跳过的项目说明外部条件不足，不计入通过）")
 	print("自检结果: ", "PASS" if fails == 0 else "FAIL")
+	# 给 CI 用的机器可读行：跳过不算失败，但 CI 会断言 skip=0
+	print("RESULT pass=%d skip=%d fail=%d" % [passes, skips, fails])
 	get_tree().quit(0 if fails == 0 else 1)
 
 

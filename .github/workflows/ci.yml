@@ -117,10 +117,20 @@ jobs:
             $stdio = "build-gdext/Release/md_stdio.exe"
             if (Test-Path $stdio) { $env:MD_STDIO_EXE = (Resolve-Path $stdio).Path }
             Write-Host "MD_STDIO_EXE=$env:MD_STDIO_EXE"
-            & $exe --headless --path $proj
+            $out2 = & $exe --headless --path $proj 2>&1
             $rc = $LASTEXITCODE
+            $out2 | Select-Object -Last 45
             Write-Host "selftest exit: $rc"
             if ($rc -ne 0) { throw "客户端自检失败，exit=$rc" }
+
+            # exit 0 不等于 transport 真跑了：skip 不计入失败。
+            # 这里断言 skip=0，否则这一轮等于什么都没验。
+            $line = $out2 | Where-Object { $_ -match "RESULT pass=" } | Select-Object -Last 1
+            Write-Host "结果行: $line"
+            if (-not $line) { throw "自检没有输出 RESULT 行" }
+            if ($line -notmatch "skip=0") {
+              throw "有 transport 被跳过，说明没真跑: $line"
+            }
           }
           catch {
             $msg = "$($_.Exception.GetType().Name): $($_.Exception.Message)"
